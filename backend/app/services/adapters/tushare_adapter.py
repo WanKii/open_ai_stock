@@ -195,6 +195,10 @@ class TushareAdapter(DataSourceAdapter):
                 )
         return rows
 
+    @property
+    def news_is_symbol_specific(self) -> bool:
+        return False
+
     def fetch_news(self, symbol: str, count: int = 20) -> list[dict[str, Any]]:
         """获取新闻。注意：Tushare news 接口不支持按个股过滤，返回的是全市场新闻。"""
         pro = self._get_pro()
@@ -238,6 +242,44 @@ class TushareAdapter(DataSourceAdapter):
                     "url": "",
                 }
             )
+        return rows
+
+    def fetch_index_daily(
+        self, index_code: str, start_date: date, end_date: date
+    ) -> list[dict[str, Any]]:
+        """获取指数日线行情。index_code 如 000300.SH / 000001.SH。"""
+        pro = self._get_pro()
+        try:
+            df = pro.index_daily(
+                ts_code=index_code,
+                start_date=start_date.strftime("%Y%m%d"),
+                end_date=end_date.strftime("%Y%m%d"),
+            )
+        except Exception as exc:
+            logger.warning("Tushare 获取指数 %s 日线失败: %s", index_code, exc)
+            return []
+
+        if df is None or df.empty:
+            return []
+
+        rows: list[dict[str, Any]] = []
+        for _, row in df.iterrows():
+            trade_date_str = str(row.get("trade_date", ""))
+            try:
+                trade_date = datetime.strptime(trade_date_str, "%Y%m%d").date()
+            except (ValueError, TypeError):
+                continue
+            close = self._safe_float(row.get("close"))
+            pct_chg = self._safe_float(row.get("pct_chg"))
+            rows.append(
+                {
+                    "index_code": index_code,
+                    "trade_date": trade_date,
+                    "close": close,
+                    "change_pct": pct_chg,
+                }
+            )
+        rows.sort(key=lambda r: r["trade_date"])
         return rows
 
     @staticmethod

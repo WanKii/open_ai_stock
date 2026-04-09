@@ -11,9 +11,11 @@ from app.core.config import load_settings
 from app.core.market_store import (
     init_market_store,
     list_seed_symbols,
+    upsert_announcements,
     upsert_company_profiles,
     upsert_daily_quotes,
     upsert_financial_reports,
+    upsert_index_daily,
     upsert_news_items,
     upsert_symbol_master,
 )
@@ -366,6 +368,14 @@ def _live_news_sync(adapter, symbols: list[str], source_name: str, count: int = 
     """使用真实适配器同步新闻。"""
     updated_at = _utc_now()
     all_rows: list[dict[str, Any]] = []
+
+    if not adapter.news_is_symbol_specific:
+        # 此数据源返回全市场新闻，不按个股过滤，跳过以避免存入无关新闻。
+        logger.info(
+            "%s 新闻接口不支持按个股过滤，已跳过新闻同步。", source_name
+        )
+        return 0
+
     for symbol in symbols:
         try:
             rows = adapter.fetch_news(symbol, count)
@@ -376,6 +386,45 @@ def _live_news_sync(adapter, symbols: list[str], source_name: str, count: int = 
         except Exception as exc:
             logger.warning("同步 %s 新闻失败: %s", symbol, exc)
     return upsert_news_items(all_rows)
+
+
+# 分析引擎需要的大盘指数代码
+_DEFAULT_INDEX_CODES = ["000300.SH", "000001.SH"]
+
+
+def _live_index_sync(adapter, source_name: str, days: int = 60) -> int:
+    """使用真实适配器同步大盘指数日线行情。"""
+    updated_at = _utc_now()
+    end_date = _utc_now().date()
+    start_date = end_date - timedelta(days=int(days * 1.5))
+
+    all_rows: list[dict[str, Any]] = []
+    for index_code in _DEFAULT_INDEX_CODES:
+        try:
+            rows = adapter.fetch_index_daily(index_code, start_date, end_date)
+            for row in rows:
+                row["source"] = source_name
+                row["updated_at"] = updated_at
+            all_rows.extend(rows)
+        except Exception as exc:
+            logger.warning("同步指数 %s 日线失败: %s", index_code, exc)
+    return upsert_index_daily(all_rows)
+
+
+def _live_announcement_sync(adapter, symbols: list[str], source_name: str, count: int = 20) -> int:
+    """使用真实适配器同步个股公告。"""
+    updated_at = _utc_now()
+    all_rows: list[dict[str, Any]] = []
+    for symbol in symbols:
+        try:
+            rows = adapter.fetch_announcements(symbol, count)
+            for row in rows:
+                row["source"] = source_name
+                row["updated_at"] = updated_at
+            all_rows.extend(rows)
+        except Exception as exc:
+            logger.warning("同步 %s 公告失败: %s", symbol, exc)
+    return upsert_announcements(all_rows)
 
 
 def execute_sync_job(job: dict[str, Any]) -> SyncExecutionResult:
@@ -438,7 +487,12 @@ def execute_sync_job(job: dict[str, Any]) -> SyncExecutionResult:
         if adapter and use_live:
             try:
                 quote_count = _live_history_sync(adapter, symbols, source_name)
-                summary = f"{source_name} 已从真实接口同步 {len(symbols)} 只股票的历史行情，共写入 {quote_count} 条日线记录。"
+                # 同时同步大盘指数日线，分析引擎 index_analyst 需要
+                index_count = _live_index_sync(adapter, source_name)
+                summary = (
+                    f"{source_name} 已从真实接口同步 {len(symbols)} 只股票的历史行情，"
+                    f"共写入 {quote_count} 条日线记录，{index_count} 条指数日线。"
+                )
                 return SyncExecutionResult(status="completed", summary=summary, warnings=[])
             except Exception as exc:
                 logger.warning("真实同步失败，回退到 fixture: %s", exc)
@@ -470,7 +524,12 @@ def execute_sync_job(job: dict[str, Any]) -> SyncExecutionResult:
         if adapter and use_live:
             try:
                 news_count = _live_news_sync(adapter, symbols, source_name)
-                summary = f"{source_name} 已从真实接口同步 {len(symbols)} 只股票的新闻，共写入 {news_count} 条新闻记录。"
+                # 同时同步个股公告，分析引擎 news_analyst 需要
+                ann_count = _live_announcement_sync(adapter, symbols, source_name)
+                summary = (
+                    f"{source_name} 已从真实接口同步 {len(symbols)} 只股票的新闻，"
+                    f"共写入 {news_count} 条新闻记录，{ann_count} 条公告。"
+                )
                 return SyncExecutionResult(status="completed", summary=summary, warnings=[])
             except Exception as exc:
                 logger.warning("真实同步失败，回退到 fixture: %s", exc)

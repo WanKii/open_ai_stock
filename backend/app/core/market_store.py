@@ -311,6 +311,68 @@ def upsert_news_items(rows: list[dict[str, Any]]) -> int:
     return len(payload)
 
 
+def upsert_index_daily(rows: list[dict[str, Any]]) -> int:
+    if not rows:
+        return 0
+
+    payload = [
+        (
+            row["index_code"],
+            row["trade_date"],
+            row["close"],
+            row["change_pct"],
+            row["source"],
+            row["updated_at"],
+        )
+        for row in rows
+    ]
+
+    with get_market_connection() as connection:
+        connection.executemany(
+            """
+            INSERT OR REPLACE INTO index_daily (
+                index_code, trade_date, close, change_pct, source, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            payload,
+        )
+
+    return len(payload)
+
+
+def upsert_announcements(rows: list[dict[str, Any]]) -> int:
+    if not rows:
+        return 0
+
+    payload = [
+        (
+            row["announcement_id"],
+            row["symbol"],
+            row["published_at"],
+            row["title"],
+            row["content"],
+            row["url"],
+            row["source"],
+            row["updated_at"],
+        )
+        for row in rows
+    ]
+
+    with get_market_connection() as connection:
+        connection.executemany(
+            """
+            INSERT OR REPLACE INTO announcements (
+                announcement_id, symbol, published_at, title, content, url, source, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            payload,
+        )
+
+    return len(payload)
+
+
 def list_seed_symbols(limit: int = 3) -> list[str]:
     with get_market_connection() as connection:
         rows = connection.execute(

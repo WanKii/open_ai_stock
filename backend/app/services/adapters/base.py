@@ -51,6 +51,32 @@ class DataSourceAdapter(ABC):
         返回字段: news_id, symbol, published_at, title, content, url
         """
 
+    def fetch_index_daily(
+        self, index_code: str, start_date: date, end_date: date
+    ) -> list[dict[str, Any]]:
+        """获取指数日线行情。
+
+        返回字段: index_code, trade_date, close, change_pct
+        默认返回空列表，子类按需覆盖。
+        """
+        return []
+
+    def fetch_announcements(self, symbol: str, count: int = 20) -> list[dict[str, Any]]:
+        """获取个股公告。
+
+        返回字段: announcement_id, symbol, published_at, title, content, url
+        默认返回空列表，子类按需覆盖。
+        """
+        return []
+
+    @property
+    def news_is_symbol_specific(self) -> bool:
+        """返回 fetch_news() 是否按个股过滤。
+
+        若为 False，sync_service 不会逐股票调用以避免存入无关新闻。
+        """
+        return True
+
     # ------------------------------------------------------------------
     # 工具方法
     # ------------------------------------------------------------------

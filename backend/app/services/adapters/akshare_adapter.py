@@ -211,6 +211,96 @@ class AKShareAdapter(DataSourceAdapter):
             )
         return rows
 
+    # AKShare 指数代码映射：Tushare 格式 → AKShare 格式
+    _INDEX_CODE_MAP: dict[str, str] = {
+        "000300.SH": "000300",  # 沪深300
+        "000001.SH": "000001",  # 上证指数
+        "399001.SZ": "399001",  # 深证成指
+        "399006.SZ": "399006",  # 创业板指
+    }
+
+    def fetch_index_daily(
+        self, index_code: str, start_date: date, end_date: date
+    ) -> list[dict[str, Any]]:
+        """获取指数日线行情。"""
+        ak = _import_akshare()
+        ak_code = self._INDEX_CODE_MAP.get(index_code, self.strip_suffix(index_code))
+
+        try:
+            df = ak.index_zh_a_hist(
+                symbol=ak_code,
+                period="daily",
+                start_date=start_date.strftime("%Y%m%d"),
+                end_date=end_date.strftime("%Y%m%d"),
+            )
+        except Exception as exc:
+            logger.warning("AKShare 获取指数 %s 日线失败: %s", index_code, exc)
+            return []
+
+        if df is None or df.empty:
+            return []
+
+        rows: list[dict[str, Any]] = []
+        for _, row in df.iterrows():
+            trade_date_str = str(row.get("日期", ""))
+            try:
+                trade_date = datetime.strptime(trade_date_str[:10], "%Y-%m-%d").date()
+            except (ValueError, TypeError):
+                continue
+            close = self._safe_float(row.get("收盘"))
+            change_pct = self._safe_float(row.get("涨跌幅"))
+            rows.append(
+                {
+                    "index_code": index_code,
+                    "trade_date": trade_date,
+                    "close": close,
+                    "change_pct": change_pct,
+                }
+            )
+        return rows
+
+    def fetch_announcements(self, symbol: str, count: int = 20) -> list[dict[str, Any]]:
+        """获取个股公告。"""
+        ak = _import_akshare()
+        code = self.strip_suffix(symbol)
+
+        try:
+            df = ak.stock_notice_report(symbol=code)
+        except Exception as exc:
+            logger.warning("AKShare 获取 %s 公告失败: %s", symbol, exc)
+            return []
+
+        if df is None or df.empty:
+            return []
+
+        rows: list[dict[str, Any]] = []
+        for _, row in df.head(count).iterrows():
+            title = str(row.get("公告标题", row.get("title", "")))
+            pub_str = str(row.get("公告日期", row.get("date", "")))
+            url = str(row.get("公告链接", row.get("url", "")))
+
+            try:
+                published_at = datetime.strptime(pub_str[:10], "%Y-%m-%d")
+                published_at = published_at.replace(tzinfo=timezone.utc)
+            except (ValueError, TypeError):
+                published_at = datetime.now(timezone.utc)
+
+            ann_id = hashlib.sha256(
+                f"akshare:{symbol}:{title}:{pub_str}".encode()
+            ).hexdigest()[:16]
+
+            rows.append(
+                {
+                    "announcement_id": f"akshare:{ann_id}",
+                    "symbol": symbol,
+                    "published_at": published_at,
+                    "title": title,
+                    "content": title,  # AKShare 公告接口通常仅返回标题
+                    "url": url,
+                }
+            )
+        return rows
+
     @staticmethod
     def _safe_float(value: Any, default: float = 0.0) -> float:
         if value is None:
