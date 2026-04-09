@@ -32,11 +32,11 @@
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r backend\requirements.txt
-python -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000
+python -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8070
 ```
 
-后端地址：`http://127.0.0.1:8000`  
-API 文档：`http://127.0.0.1:8000/docs`
+后端地址：`http://127.0.0.1:8070`  
+API 文档：`http://127.0.0.1:8070/docs`
 
 ### 前端
 
