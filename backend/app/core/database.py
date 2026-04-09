@@ -10,6 +10,7 @@ from .config import SQLITE_PATH, ensure_project_dirs
 def init_db() -> None:
     ensure_project_dirs()
     with sqlite3.connect(SQLITE_PATH) as connection:
+        connection.execute("PRAGMA journal_mode=WAL")
         connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS analysis_tasks (
@@ -80,6 +81,7 @@ def init_db() -> None:
 def get_connection() -> Iterator[sqlite3.Connection]:
     connection = sqlite3.connect(SQLITE_PATH)
     connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA journal_mode=WAL")
     try:
         yield connection
         connection.commit()

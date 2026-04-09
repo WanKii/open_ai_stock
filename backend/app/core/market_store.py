@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from contextlib import contextmanager
 from typing import Any, Iterator
 
@@ -113,15 +114,31 @@ def _import_duckdb():
     return duckdb
 
 
+_connection_lock = threading.Lock()
+_shared_connection = None
+
+
+def _get_shared_connection():
+    global _shared_connection
+    if _shared_connection is None:
+        ensure_project_dirs()
+        duckdb = _import_duckdb()
+        _shared_connection = duckdb.connect(str(DUCKDB_PATH))
+    return _shared_connection
+
+
 @contextmanager
 def get_market_connection() -> Iterator[Any]:
-    ensure_project_dirs()
-    duckdb = _import_duckdb()
-    connection = duckdb.connect(str(DUCKDB_PATH))
-    try:
-        yield connection
-    finally:
-        connection.close()
+    with _connection_lock:
+        yield _get_shared_connection()
+
+
+def close_market_connection() -> None:
+    global _shared_connection
+    with _connection_lock:
+        if _shared_connection is not None:
+            _shared_connection.close()
+            _shared_connection = None
 
 
 def init_market_store() -> bool:
@@ -307,3 +324,129 @@ def list_seed_symbols(limit: int = 3) -> list[str]:
         ).fetchall()
 
     return [row[0] for row in rows]
+
+
+# ---------------------------------------------------------------------------
+# 查询函数 — 面向分析引擎的读取层
+# ---------------------------------------------------------------------------
+
+
+def get_symbol_info(symbol: str) -> dict[str, Any] | None:
+    with get_market_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT sm.symbol, sm.exchange, sm.name, sm.listing_date, sm.status,
+                   cp.industry, cp.area
+            FROM symbol_master sm
+            LEFT JOIN company_profile cp ON sm.symbol = cp.symbol
+            WHERE sm.symbol = ?
+            """,
+            [symbol],
+        ).fetchone()
+
+    if not row:
+        return None
+    cols = ["symbol", "exchange", "name", "listing_date", "status", "industry", "area"]
+    return dict(zip(cols, row))
+
+
+def get_daily_quotes(symbol: str, days: int = 60) -> list[dict[str, Any]]:
+    with get_market_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT trade_date, open, high, low, close, volume, amount, source
+            FROM daily_quotes
+            WHERE symbol = ?
+            ORDER BY trade_date DESC
+            LIMIT ?
+            """,
+            [symbol, days],
+        ).fetchall()
+
+    cols = ["trade_date", "open", "high", "low", "close", "volume", "amount", "source"]
+    return [dict(zip(cols, row)) for row in reversed(rows)]
+
+
+def get_financials(symbol: str, quarters: int = 4) -> list[dict[str, Any]]:
+    with get_market_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT report_date, report_type, revenue, net_profit, roe, gross_margin, source
+            FROM financial_reports
+            WHERE symbol = ?
+            ORDER BY report_date DESC
+            LIMIT ?
+            """,
+            [symbol, quarters],
+        ).fetchall()
+
+    cols = ["report_date", "report_type", "revenue", "net_profit", "roe", "gross_margin", "source"]
+    return [dict(zip(cols, row)) for row in reversed(rows)]
+
+
+def get_news(symbol: str, count: int = 20) -> list[dict[str, Any]]:
+    with get_market_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT news_id, published_at, title, content, url, source
+            FROM news_items
+            WHERE symbol = ?
+            ORDER BY published_at DESC
+            LIMIT ?
+            """,
+            [symbol, count],
+        ).fetchall()
+
+    cols = ["news_id", "published_at", "title", "content", "url", "source"]
+    return [dict(zip(cols, row)) for row in rows]
+
+
+def get_announcements(symbol: str, count: int = 20) -> list[dict[str, Any]]:
+    with get_market_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT announcement_id, published_at, title, content, url, source
+            FROM announcements
+            WHERE symbol = ?
+            ORDER BY published_at DESC
+            LIMIT ?
+            """,
+            [symbol, count],
+        ).fetchall()
+
+    cols = ["announcement_id", "published_at", "title", "content", "url", "source"]
+    return [dict(zip(cols, row)) for row in rows]
+
+
+def get_index_daily(index_code: str, days: int = 60) -> list[dict[str, Any]]:
+    with get_market_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT trade_date, close, change_pct, source
+            FROM index_daily
+            WHERE index_code = ?
+            ORDER BY trade_date DESC
+            LIMIT ?
+            """,
+            [index_code, days],
+        ).fetchall()
+
+    cols = ["trade_date", "close", "change_pct", "source"]
+    return [dict(zip(cols, row)) for row in reversed(rows)]
+
+
+def get_sector_daily(sector_code: str, days: int = 60) -> list[dict[str, Any]]:
+    with get_market_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT trade_date, close, change_pct, source
+            FROM sector_daily
+            WHERE sector_code = ?
+            ORDER BY trade_date DESC
+            LIMIT ?
+            """,
+            [sector_code, days],
+        ).fetchall()
+
+    cols = ["trade_date", "close", "change_pct", "source"]
+    return [dict(zip(cols, row)) for row in reversed(rows)]

@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import hashlib
+import logging
+import threading
 import time
 from datetime import datetime, timezone
 
 from app.core.config import load_settings
 from app.services import repository
 from app.services.sync_service import execute_sync_job
+
+logger = logging.getLogger(__name__)
+
+TASK_TIMEOUT_SECONDS = 300
 
 
 AGENT_LABELS = {
@@ -144,11 +150,37 @@ def process_analysis_task(task_id: str) -> None:
 
     repository.update_task_status(task_id, "running")
     repository.add_system_log("analysis", "INFO", f"任务 {task_id} 进入执行状态。", task_id)
-    time.sleep(1.2)
 
-    settings = load_settings()
-    report = build_report(task, settings)
-    repository.save_report(task_id, report)
+    result_holder: list[Exception | None] = [None]
+
+    def _run() -> None:
+        try:
+            time.sleep(1.2)
+            settings = load_settings()
+            report = build_report(task, settings)
+            repository.save_report(task_id, report)
+        except Exception as exc:
+            result_holder[0] = exc
+
+    worker = threading.Thread(target=_run, daemon=True)
+    worker.start()
+    worker.join(timeout=TASK_TIMEOUT_SECONDS)
+
+    if worker.is_alive():
+        message = f"任务 {task_id} 执行超时（{TASK_TIMEOUT_SECONDS}s）。"
+        logger.warning(message)
+        repository.update_task_status(task_id, "failed", warnings=[message])
+        repository.add_operation_log("analysis", "timeout", "ERROR", message, task_id)
+        repository.add_system_log("analysis", "ERROR", message, task_id)
+        return
+
+    if result_holder[0] is not None:
+        message = f"分析任务执行失败：{result_holder[0]}"
+        repository.update_task_status(task_id, "failed")
+        repository.add_operation_log("analysis", "failed", "ERROR", message, task_id)
+        repository.add_system_log("analysis", "ERROR", message, task_id)
+        return
+
     repository.update_task_status(task_id, "completed")
     repository.add_operation_log("analysis", "complete", "INFO", f"{task['symbol']} 分析完成。", task_id)
     repository.add_system_log("analysis", "INFO", f"任务 {task_id} 报告已落库。", task_id)
@@ -162,16 +194,37 @@ def process_sync_job(job_id: str) -> None:
     repository.update_sync_job(job_id, "running")
     repository.add_system_log("sync", "INFO", f"同步任务 {job_id} 开始执行。", job_id)
 
-    try:
-        result = execute_sync_job(job)
-        log_level = "WARN" if result.status == "completed_with_warnings" else "INFO"
-        repository.update_sync_job(job_id, result.status, result_summary=result.summary)
-        repository.add_operation_log("sync", "complete", log_level, result.summary, job_id)
-        for warning in result.warnings:
-            repository.add_system_log("sync", "WARN", warning, job_id)
-        repository.add_system_log("sync", "INFO", f"同步任务 {job_id} 执行完成。", job_id)
-    except Exception as exc:
-        message = f"同步任务执行失败：{exc}"
+    result_holder: list = [None, None]  # [result, exception]
+
+    def _run() -> None:
+        try:
+            result_holder[0] = execute_sync_job(job)
+        except Exception as exc:
+            result_holder[1] = exc
+
+    worker = threading.Thread(target=_run, daemon=True)
+    worker.start()
+    worker.join(timeout=TASK_TIMEOUT_SECONDS)
+
+    if worker.is_alive():
+        message = f"同步任务 {job_id} 执行超时（{TASK_TIMEOUT_SECONDS}s）。"
+        logger.warning(message)
+        repository.update_sync_job(job_id, "failed", result_summary=message)
+        repository.add_operation_log("sync", "timeout", "ERROR", message, job_id)
+        repository.add_system_log("sync", "ERROR", message, job_id)
+        return
+
+    if result_holder[1] is not None:
+        message = f"同步任务执行失败：{result_holder[1]}"
         repository.update_sync_job(job_id, "failed", result_summary=message)
         repository.add_operation_log("sync", "failed", "ERROR", message, job_id)
         repository.add_system_log("sync", "ERROR", message, job_id)
+        return
+
+    result = result_holder[0]
+    log_level = "WARN" if result.status == "completed_with_warnings" else "INFO"
+    repository.update_sync_job(job_id, result.status, result_summary=result.summary)
+    repository.add_operation_log("sync", "complete", log_level, result.summary, job_id)
+    for warning in result.warnings:
+        repository.add_system_log("sync", "WARN", warning, job_id)
+    repository.add_system_log("sync", "INFO", f"同步任务 {job_id} 执行完成。", job_id)

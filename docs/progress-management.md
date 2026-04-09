@@ -13,7 +13,7 @@
 | 当前状态 | 已启动，基础骨架已完成 |
 | 总目标周期 | 30 个自然日 |
 | 当前版本目标 | v0.1.0 MVP |
-| 当前进度判断 | 已完成 M0/M1，M2/M3 进行中（骨架+fixture 闭环已通），M4 UI 层已完成 |
+| 当前进度判断 | 已完成 M0/M1，M2/M3 进行中（骨架+fixture 闭环已通，架构加固+查询层已完成），M4 UI 层已完成 |
 
 ## 3. 当前开发进度快照
 ### 3.1 已完成
@@ -48,17 +48,17 @@
 - 前端轮询使用 `setInterval`，组件销毁时清理了 interval 但未取消进行中的 fetch 请求
 
 ### 3.3 代码审计发现的架构问题（v0.1.0 应修复）
-- `main.py` 缺少全局异常处理中间件，未捕获异常返回 500 裸响应
-- CORS 配置 `allow_origins=["*"]`，MVP 阶段应收紧为本地开发地址
-- SQLite 未启用 WAL 模式，多个 BackgroundTasks 并发写入存在锁冲突风险
-- DuckDB `market_store.py` 每次操作 `duckdb.connect()`，缺少连接复用
-- `load_settings()` 仅在 `on_startup` 时调用，`PUT /api/settings` 后进程内缓存不刷新
-- 分析任务和同步任务无超时保护，若 LLM 或数据源挂起任务将永久处于 running 状态
+- ~~`main.py` 缺少全局异常处理中间件，未捕获异常返回 500 裸响应~~ ✅ 已修复
+- ~~CORS 配置 `allow_origins=["*"]`，MVP 阶段应收紧为本地开发地址~~ ✅ 已修复
+- ~~SQLite 未启用 WAL 模式，多个 BackgroundTasks 并发写入存在锁冲突风险~~ ✅ 已修复
+- ~~DuckDB `market_store.py` 每次操作 `duckdb.connect()`，缺少连接复用~~ ✅ 已修复
+- ~~`load_settings()` 仅在 `on_startup` 时调用，`PUT /api/settings` 后进程内缓存不刷新~~ ✅ 已修复
+- ~~分析任务和同步任务无超时保护，若 LLM 或数据源挂起任务将永久处于 running 状态~~ ✅ 已修复
 
 ### 3.4 下一阶段重点
-- **架构加固**：修复 3.3 中发现的 6 项架构问题
+- ~~**架构加固**：修复 3.3 中发现的 6 项架构问题~~ ✅ 全部完成
+- ~~**DuckDB 查询层**：补齐 `get_daily_quotes` / `get_financials` / `get_news` 等读取函数~~ ✅ 已完成
 - **真实数据源接入**：实现 Tushare / AKShare / BaoStock 适配器，替换 fixture 数据
-- **DuckDB 查询层**：补齐 `get_daily_quotes` / `get_financials` / `get_news` 等读取函数
 - **真实 LLM 编排**：将 `demo_engine.py` 替换为真实多 Agent 调用链路
 - **报告真实化**：报告内容与真实数据快照对应
 

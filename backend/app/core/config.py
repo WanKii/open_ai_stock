@@ -79,6 +79,9 @@ def ensure_project_dirs() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
+_settings_cache: dict[str, Any] | None = None
+
+
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     merged = copy.deepcopy(base)
     for key, value in override.items():
@@ -127,13 +130,18 @@ def render_settings_toml(settings: dict[str, Any]) -> str:
 
 
 def save_settings(settings: dict[str, Any]) -> dict[str, Any]:
+    global _settings_cache
     ensure_project_dirs()
     merged = _deep_merge(DEFAULT_SETTINGS, settings)
     SETTINGS_PATH.write_text(render_settings_toml(merged), encoding="utf-8")
+    _settings_cache = merged
     return merged
 
 
 def load_settings() -> dict[str, Any]:
+    global _settings_cache
+    if _settings_cache is not None:
+        return copy.deepcopy(_settings_cache)
     ensure_project_dirs()
     if not SETTINGS_PATH.exists():
         return save_settings(DEFAULT_SETTINGS)
@@ -141,7 +149,14 @@ def load_settings() -> dict[str, Any]:
     with SETTINGS_PATH.open("rb") as handle:
         loaded = tomllib.load(handle)
 
-    return _deep_merge(DEFAULT_SETTINGS, loaded)
+    _settings_cache = _deep_merge(DEFAULT_SETTINGS, loaded)
+    return copy.deepcopy(_settings_cache)
+
+
+def reload_settings() -> dict[str, Any]:
+    global _settings_cache
+    _settings_cache = None
+    return load_settings()
 
 
 def mask_secrets(settings: dict[str, Any]) -> dict[str, Any]:

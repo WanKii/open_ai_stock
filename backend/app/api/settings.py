@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.core.config import load_settings, mask_secrets, merge_incoming_settings, save_settings
+from app.core.config import load_settings, mask_secrets, merge_incoming_settings, reload_settings, save_settings
 from app.models.schemas import SystemSettings, TestConnectionRequest, TestConnectionResponse
 from app.services import repository
 from app.services.sync_service import describe_source_status
@@ -20,6 +20,7 @@ def get_settings() -> SystemSettings:
 def update_settings(payload: dict) -> SystemSettings:
     merged = merge_incoming_settings(payload)
     saved = save_settings(merged)
+    reload_settings()
     repository.add_operation_log("settings", "update", "INFO", "系统配置已更新。")
     return SystemSettings.model_validate(mask_secrets(saved))
 

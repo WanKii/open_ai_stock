@@ -1,7 +1,10 @@
 from __future__ import annotations
 
-from fastapi import FastAPI
+import logging
+
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.api.analysis import router as analysis_router
 from app.api.logs import router as logs_router
@@ -12,6 +15,7 @@ from app.core.config import load_settings
 from app.core.database import init_db
 from app.core.market_store import init_market_store
 
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="A股 LLM 股票分析网站 API",
@@ -21,11 +25,27 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    logger.exception("Unhandled exception on %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "code": "INTERNAL_ERROR",
+            "message": "服务器内部错误，请稍后重试。",
+            "detail": str(exc) if app.debug else None,
+        },
+    )
 
 
 @app.on_event("startup")
