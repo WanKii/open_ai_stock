@@ -1,5 +1,5 @@
 <template>
-  <div class="panel">
+  <div v-loading="loading" class="panel">
     <div class="panel__header">
       <div>
         <p class="eyebrow">TRACE CENTER</p>
@@ -40,6 +40,7 @@
 
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
+import { ElMessage } from "element-plus";
 
 import { listLogs } from "../api/client";
 import StatusBadge from "../components/StatusBadge.vue";
@@ -49,18 +50,27 @@ const logs = ref<LogEntry[]>([]);
 const kind = ref<"all" | "operation" | "system">("all");
 const level = ref("");
 const taskId = ref("");
+const loading = ref(false);
 
 function formatDate(value: string) {
   return new Date(value).toLocaleString("zh-CN");
 }
 
 async function loadLogsData() {
-  logs.value = await listLogs({
-    kind: kind.value,
-    level: level.value || undefined,
-    task_id: taskId.value || undefined,
-    limit: 120
-  });
+  loading.value = true;
+  try {
+    logs.value = await listLogs({
+      kind: kind.value,
+      level: level.value || undefined,
+      task_id: taskId.value || undefined,
+      limit: 120
+    });
+  } catch (error) {
+    logs.value = [];
+    ElMessage.error(error instanceof Error ? error.message : "日志加载失败");
+  } finally {
+    loading.value = false;
+  }
 }
 
 onMounted(loadLogsData);

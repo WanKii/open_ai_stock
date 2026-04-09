@@ -1,6 +1,6 @@
 <template>
   <div class="workspace-grid workspace-grid--sources">
-    <section class="panel">
+    <section v-loading="loading" class="panel">
       <div class="panel__header">
         <div>
           <p class="eyebrow">SOURCE MATRIX</p>
@@ -28,17 +28,52 @@
           </div>
 
           <div class="sync-actions">
-            <el-button size="small" @click="createJob(source.source, 'health_check')">接口校验</el-button>
-            <el-button size="small" @click="createJob(source.source, 'symbol_sync')">基本信息</el-button>
-            <el-button size="small" @click="createJob(source.source, 'history_sync')">历史数据</el-button>
-            <el-button size="small" @click="createJob(source.source, 'financial_sync')">财务数据</el-button>
-            <el-button size="small" @click="createJob(source.source, 'news_sync')">新闻数据</el-button>
+            <el-button
+              size="small"
+              :loading="isSubmitting(source.source, 'health_check')"
+              :disabled="isJobLocked(source.source, 'health_check')"
+              @click="createJob(source.source, 'health_check')"
+            >
+              接口校验
+            </el-button>
+            <el-button
+              size="small"
+              :loading="isSubmitting(source.source, 'symbol_sync')"
+              :disabled="isJobLocked(source.source, 'symbol_sync')"
+              @click="createJob(source.source, 'symbol_sync')"
+            >
+              基本信息
+            </el-button>
+            <el-button
+              size="small"
+              :loading="isSubmitting(source.source, 'history_sync')"
+              :disabled="isJobLocked(source.source, 'history_sync')"
+              @click="createJob(source.source, 'history_sync')"
+            >
+              历史数据
+            </el-button>
+            <el-button
+              size="small"
+              :loading="isSubmitting(source.source, 'financial_sync')"
+              :disabled="isJobLocked(source.source, 'financial_sync')"
+              @click="createJob(source.source, 'financial_sync')"
+            >
+              财务数据
+            </el-button>
+            <el-button
+              size="small"
+              :loading="isSubmitting(source.source, 'news_sync')"
+              :disabled="isJobLocked(source.source, 'news_sync')"
+              @click="createJob(source.source, 'news_sync')"
+            >
+              新闻数据
+            </el-button>
           </div>
         </article>
       </div>
     </section>
 
-    <section class="panel">
+    <section v-loading="loading" class="panel">
       <div class="panel__header">
         <div>
           <p class="eyebrow">SYNC JOBS</p>
@@ -58,7 +93,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { onMounted, reactive, ref } from "vue";
 import { ElMessage } from "element-plus";
 
 import { createSyncJob, getSourceStatuses, listSyncJobs } from "../api/client";
@@ -68,15 +103,51 @@ import { useWorkspaceStore } from "../stores/workspace";
 
 const statuses = ref<DataSourceStatus[]>([]);
 const jobs = ref<SyncJob[]>([]);
+const loading = ref(false);
+const submittingJobs = reactive<Record<string, boolean>>({});
 const workspaceStore = useWorkspaceStore();
 
 async function loadSourceData() {
-  const [statusList, jobList] = await Promise.all([getSourceStatuses(), listSyncJobs()]);
-  statuses.value = statusList;
-  jobs.value = jobList;
+  loading.value = true;
+  try {
+    const [statusList, jobList] = await Promise.all([getSourceStatuses(), listSyncJobs()]);
+    statuses.value = statusList;
+    jobs.value = jobList;
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "数据源状态加载失败");
+  } finally {
+    loading.value = false;
+  }
+}
+
+function getJobKey(source: string, jobType: string) {
+  return `${source}:${jobType}`;
+}
+
+function isSubmitting(source: string, jobType: string) {
+  return Boolean(submittingJobs[getJobKey(source, jobType)]);
+}
+
+function isJobLocked(source: string, jobType: string) {
+  return (
+    isSubmitting(source, jobType) ||
+    jobs.value.some(
+      (job) =>
+        job.source === source &&
+        job.job_type === jobType &&
+        (job.status === "queued" || job.status === "running")
+    )
+  );
 }
 
 async function createJob(source: string, jobType: string) {
+  if (isJobLocked(source, jobType)) {
+    ElMessage.warning("相同数据源的同类同步任务正在执行，请稍后再试。");
+    return;
+  }
+
+  const jobKey = getJobKey(source, jobType);
+  submittingJobs[jobKey] = true;
   try {
     await createSyncJob({
       source,
@@ -89,6 +160,8 @@ async function createJob(source: string, jobType: string) {
     ElMessage.success(`${source} ${jobType} 已加入队列。`);
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "同步任务提交失败");
+  } finally {
+    delete submittingJobs[jobKey];
   }
 }
 

@@ -1,6 +1,6 @@
 <template>
   <div class="workspace-grid workspace-grid--history">
-    <section class="panel">
+    <section v-loading="historyLoading" class="panel">
       <div class="panel__header">
         <div>
           <p class="eyebrow">ARCHIVE</p>
@@ -27,7 +27,7 @@
       </el-table>
     </section>
 
-    <section class="panel">
+    <section v-loading="reportLoading" class="panel">
       <div class="panel__header">
         <div>
           <p class="eyebrow">DETAIL</p>
@@ -67,6 +67,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
+import { ElMessage } from "element-plus";
 
 import { getAnalysisReport, listAnalysisTasks } from "../api/client";
 import AgentInsightCard from "../components/AgentInsightCard.vue";
@@ -78,6 +79,8 @@ const selectedTask = ref<AnalysisTask | null>(null);
 const selectedReport = ref<AnalysisReport | null>(null);
 const keyword = ref("");
 const statusFilter = ref("");
+const historyLoading = ref(false);
+const reportLoading = ref(false);
 
 const filteredTasks = computed(() =>
   tasks.value.filter((task) => {
@@ -88,14 +91,31 @@ const filteredTasks = computed(() =>
 );
 
 async function loadHistory() {
-  tasks.value = await listAnalysisTasks();
+  historyLoading.value = true;
+  try {
+    tasks.value = await listAnalysisTasks();
+  } catch (error) {
+    tasks.value = [];
+    ElMessage.error(error instanceof Error ? error.message : "历史记录加载失败");
+  } finally {
+    historyLoading.value = false;
+  }
 }
 
 async function selectTask(task: AnalysisTask) {
   selectedTask.value = task;
   if (task.status === "completed" || task.status === "completed_with_warnings") {
-    selectedReport.value = await getAnalysisReport(task.id);
+    reportLoading.value = true;
+    try {
+      selectedReport.value = await getAnalysisReport(task.id);
+    } catch (error) {
+      selectedReport.value = null;
+      ElMessage.error(error instanceof Error ? error.message : "报告加载失败");
+    } finally {
+      reportLoading.value = false;
+    }
   } else {
+    reportLoading.value = false;
     selectedReport.value = null;
   }
 }

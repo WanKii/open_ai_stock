@@ -11,7 +11,26 @@
 
       <el-form label-position="top" class="analysis-form">
         <el-form-item label="股票代码">
-          <el-input v-model="form.symbol" placeholder="例如 600519.SH / 000001.SZ" />
+          <el-autocomplete
+            v-model="form.symbol"
+            :fetch-suggestions="queryStockSuggestions"
+            value-key="symbol"
+            trigger-on-focus="false"
+            fit-input-width
+            clearable
+            placeholder="例如 600519.SH / 000001.SZ"
+            @select="handleSuggestionSelect"
+          >
+            <template #default="{ item }">
+              <div class="stock-suggestion">
+                <div class="stock-suggestion__headline">
+                  <strong>{{ item.symbol }}</strong>
+                  <span>{{ item.name }}</span>
+                </div>
+                <small>{{ item.exchange }} · {{ item.industry || item.area || "已同步基础信息" }}</small>
+              </div>
+            </template>
+          </el-autocomplete>
         </el-form-item>
 
         <el-form-item label="分析深度">
@@ -179,11 +198,11 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
 
-import { createAnalysisTask, getAnalysisReport, listAnalysisTasks } from "../api/client";
+import { createAnalysisTask, getAnalysisReport, listAnalysisTasks, listStocks } from "../api/client";
 import AgentInsightCard from "../components/AgentInsightCard.vue";
 import PricePulseChart from "../components/PricePulseChart.vue";
 import StatusBadge from "../components/StatusBadge.vue";
-import type { AnalysisDepth, AnalysisReport, AnalysisTask } from "../types";
+import type { AnalysisDepth, AnalysisReport, AnalysisTask, StockListItem } from "../types";
 import { useWorkspaceStore } from "../stores/workspace";
 
 const workspaceStore = useWorkspaceStore();
@@ -204,6 +223,7 @@ const activeReport = ref<AnalysisReport | null>(null);
 const submitting = ref(false);
 let pollTimer: number | undefined;
 let abortController: AbortController | null = null;
+let suggestionRequestId = 0;
 
 const agentOptions = [
   { label: "市场分析师", value: "market_analyst" },
@@ -255,6 +275,30 @@ async function loadReport(taskId: string) {
   } catch {
     activeReport.value = null;
   }
+}
+
+async function queryStockSuggestions(query: string, callback: (items: StockListItem[]) => void) {
+  const keyword = query.trim();
+  if (!keyword) {
+    callback([]);
+    return;
+  }
+
+  const requestId = ++suggestionRequestId;
+  try {
+    const { items } = await listStocks(1, 8, keyword);
+    if (requestId === suggestionRequestId) {
+      callback(items);
+    }
+  } catch {
+    if (requestId === suggestionRequestId) {
+      callback([]);
+    }
+  }
+}
+
+function handleSuggestionSelect(item: StockListItem) {
+  form.value.symbol = item.symbol;
 }
 
 async function refreshTasks() {
@@ -337,3 +381,28 @@ watch(selectedTaskId, async (taskId) => {
 onMounted(refreshTasks);
 onBeforeUnmount(stopPolling);
 </script>
+
+<style scoped>
+.stock-suggestion {
+  display: grid;
+  gap: 4px;
+  padding: 4px 0;
+}
+
+.stock-suggestion strong,
+.stock-suggestion span,
+.stock-suggestion small {
+  line-height: 1.4;
+}
+
+.stock-suggestion__headline {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.stock-suggestion__headline span,
+.stock-suggestion small {
+  color: var(--muted);
+}
+</style>
