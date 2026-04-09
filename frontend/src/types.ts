@@ -125,3 +125,45 @@ export interface SyncJob {
   started_at?: string | null;
   finished_at?: string | null;
 }
+
+// ---------------------------------------------------------------------------
+// 股票数据管理
+// ---------------------------------------------------------------------------
+
+export interface StockListItem {
+  symbol: string;
+  name: string;
+  exchange: string;
+  industry?: string | null;
+  area?: string | null;
+  listing_date?: string | null;
+  status: string;
+}
+
+export interface StockListResponse {
+  items: StockListItem[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface DataTypeSummary {
+  source: string;
+  data_type: string;
+  record_count: number;
+  latest_date?: string | null;
+}
+
+export interface StockDataSummaryResponse {
+  symbol: string;
+  name: string;
+  summaries: DataTypeSummary[];
+}
+
+export interface StockDataPageResponse {
+  rows: Record<string, unknown>[];
+  total: number;
+  page: number;
+  page_size: number;
+  columns: string[];
+}

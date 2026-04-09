@@ -3,6 +3,9 @@ import type {
   AnalysisTask,
   DataSourceStatus,
   LogEntry,
+  StockDataPageResponse,
+  StockDataSummaryResponse,
+  StockListResponse,
   SyncJob,
   SystemSettings,
   TaskCreatedResponse
@@ -96,4 +99,58 @@ export function createSyncJob(payload: {
     method: "POST",
     body: JSON.stringify(payload)
   });
+}
+
+// ---------------------------------------------------------------------------
+// 股票数据管理
+// ---------------------------------------------------------------------------
+
+export function listStocks(page = 1, pageSize = 50, search?: string) {
+  const query = new URLSearchParams();
+  query.set("page", String(page));
+  query.set("page_size", String(pageSize));
+  if (search) query.set("search", search);
+  return request<StockListResponse>(`/stocks?${query.toString()}`);
+}
+
+export function getStockDataSummary(symbol: string) {
+  return request<StockDataSummaryResponse>(`/stocks/${encodeURIComponent(symbol)}/data-summary`);
+}
+
+export function getStockData(
+  symbol: string,
+  source: string,
+  dataType: string,
+  page = 1,
+  pageSize = 50
+) {
+  const query = new URLSearchParams({
+    source,
+    data_type: dataType,
+    page: String(page),
+    page_size: String(pageSize)
+  });
+  return request<StockDataPageResponse>(
+    `/stocks/${encodeURIComponent(symbol)}/data?${query.toString()}`
+  );
+}
+
+export function getStockDataDownloadUrl(symbol: string, source: string, dataType: string) {
+  const query = new URLSearchParams({ source, data_type: dataType });
+  return `${baseUrl}/stocks/${encodeURIComponent(symbol)}/data/download?${query.toString()}`;
+}
+
+export function deleteStockData(symbol: string, source: string, dataType: string) {
+  const query = new URLSearchParams({ source, data_type: dataType });
+  return request<{ deleted_count: number }>(
+    `/stocks/${encodeURIComponent(symbol)}/data?${query.toString()}`,
+    { method: "DELETE" }
+  );
+}
+
+export function syncStockBySource(symbol: string, source: string) {
+  return request<SyncJob[]>(
+    `/stocks/${encodeURIComponent(symbol)}/sync`,
+    { method: "POST", body: JSON.stringify({ source }) }
+  );
 }

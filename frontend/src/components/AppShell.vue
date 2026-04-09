@@ -76,6 +76,7 @@
 import {
   Collection,
   DataAnalysis,
+  Grid,
   Memo,
   Setting,
   TrendCharts
@@ -95,7 +96,8 @@ const navItems = [
   { path: "/history", label: "历史分析记录", hint: "回看历史任务与结论", icon: Collection },
   { path: "/settings", label: "系统设置", hint: "维护模型、数据源和提示词", icon: Setting },
   { path: "/logs", label: "日志", hint: "跟踪系统与操作日志", icon: Memo },
-  { path: "/sources", label: "数据源", hint: "校验状态并手动同步", icon: DataAnalysis }
+  { path: "/sources", label: "数据源", hint: "校验状态并手动同步", icon: DataAnalysis },
+  { path: "/stock-data", label: "股票数据", hint: "查看与管理各源各类型数据", icon: Grid }
 ];
 
 onMounted(() => {

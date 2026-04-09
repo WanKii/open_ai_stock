@@ -27,10 +27,10 @@ class AKShareAdapter(DataSourceAdapter):
     def test_connection(self) -> tuple[bool, str]:
         try:
             ak = _import_akshare()
-            # 用一次轻量调用验证连接
-            df = ak.stock_zh_a_spot_em()
+            # 用一次轻量调用验证连接（交易日历数据量极小，不易被断连）
+            df = ak.tool_trade_date_hist_sina()
             if df is not None and len(df) > 0:
-                return True, f"AKShare 连接正常，获取到 {len(df)} 只个股实时行情。"
+                return True, f"AKShare 连接正常，获取到 {len(df)} 条交易日历数据。"
             return False, "AKShare 返回空数据。"
         except ImportError:
             return False, "未安装 akshare 包，请执行 pip install akshare。"

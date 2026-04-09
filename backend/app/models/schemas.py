@@ -152,3 +152,50 @@ class DataSourceStatus(BaseModel):
     supports: list[str] = Field(default_factory=list)
     status: str = "unknown"
     note: str = ""
+
+
+# ---------------------------------------------------------------------------
+# 股票数据管理
+# ---------------------------------------------------------------------------
+
+
+class StockListItem(BaseModel):
+    symbol: str
+    name: str
+    exchange: str
+    industry: str | None = None
+    area: str | None = None
+    listing_date: str | None = None
+    status: str
+
+
+class StockListResponse(BaseModel):
+    items: list[StockListItem]
+    total: int
+    page: int
+    page_size: int
+
+
+class DataTypeSummary(BaseModel):
+    source: str
+    data_type: str
+    record_count: int
+    latest_date: str | None = None
+
+
+class StockDataSummaryResponse(BaseModel):
+    symbol: str
+    name: str
+    summaries: list[DataTypeSummary]
+
+
+class StockDataPageResponse(BaseModel):
+    rows: list[dict[str, Any]]
+    total: int
+    page: int
+    page_size: int
+    columns: list[str]
+
+
+class DeleteDataResponse(BaseModel):
+    deleted_count: int

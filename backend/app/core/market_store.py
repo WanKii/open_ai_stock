@@ -512,3 +512,177 @@ def get_sector_daily(sector_code: str, days: int = 60) -> list[dict[str, Any]]:
 
     cols = ["trade_date", "close", "change_pct", "source"]
     return [dict(zip(cols, row)) for row in reversed(rows)]
+
+
+# ---------------------------------------------------------------------------
+# 股票数据管理 — 列表 / 汇总 / 分页查看 / 导出 / 删除
+# ---------------------------------------------------------------------------
+
+_DATA_TYPE_TABLE: dict[str, str] = {
+    "daily_quotes": "daily_quotes",
+    "financial_reports": "financial_reports",
+    "news_items": "news_items",
+    "announcements": "announcements",
+}
+
+
+def list_stocks(
+    page: int = 1,
+    page_size: int = 50,
+    search: str | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    """分页查询已同步的股票列表，支持按代码/名称模糊搜索。返回 (rows, total)。"""
+    where = ""
+    params: list[Any] = []
+    if search:
+        where = "WHERE sm.symbol ILIKE ? OR sm.name ILIKE ?"
+        params = [f"%{search}%", f"%{search}%"]
+
+    with get_market_connection() as connection:
+        total_row = connection.execute(
+            f"SELECT COUNT(*) FROM symbol_master sm {where}", params
+        ).fetchone()
+        total = total_row[0] if total_row else 0
+
+        offset = (page - 1) * page_size
+        rows = connection.execute(
+            f"""
+            SELECT sm.symbol, sm.exchange, sm.name, sm.listing_date, sm.status,
+                   cp.industry, cp.area
+            FROM symbol_master sm
+            LEFT JOIN company_profile cp ON sm.symbol = cp.symbol
+            {where}
+            ORDER BY sm.symbol ASC
+            LIMIT ? OFFSET ?
+            """,
+            [*params, page_size, offset],
+        ).fetchall()
+
+    cols = ["symbol", "exchange", "name", "listing_date", "status", "industry", "area"]
+    return [dict(zip(cols, row)) for row in rows], total
+
+
+def get_stock_data_summary(symbol: str) -> list[dict[str, Any]]:
+    """返回某支股票在各数据源 × 各数据类型下的记录数和最新日期。"""
+    sql = """
+    SELECT 'daily_quotes' AS data_type, source,
+           COUNT(*) AS record_count, MAX(trade_date)::TEXT AS latest_date
+    FROM daily_quotes WHERE symbol = ? GROUP BY source
+    UNION ALL
+    SELECT 'financial_reports', source,
+           COUNT(*), MAX(report_date)::TEXT
+    FROM financial_reports WHERE symbol = ? GROUP BY source
+    UNION ALL
+    SELECT 'news_items', source,
+           COUNT(*), MAX(published_at)::TEXT
+    FROM news_items WHERE symbol = ? GROUP BY source
+    UNION ALL
+    SELECT 'announcements', source,
+           COUNT(*), MAX(published_at)::TEXT
+    FROM announcements WHERE symbol = ? GROUP BY source
+    """
+    with get_market_connection() as connection:
+        rows = connection.execute(sql, [symbol, symbol, symbol, symbol]).fetchall()
+
+    cols = ["data_type", "source", "record_count", "latest_date"]
+    return [dict(zip(cols, row)) for row in rows]
+
+
+def _data_type_columns(data_type: str) -> tuple[str, list[str]]:
+    """返回 (sql_select_columns_str, col_names_list)。"""
+    if data_type == "daily_quotes":
+        cols = ["trade_date", "open", "high", "low", "close", "volume", "amount", "source"]
+        order = "trade_date DESC"
+    elif data_type == "financial_reports":
+        cols = ["report_date", "report_type", "revenue", "net_profit", "roe", "gross_margin", "source"]
+        order = "report_date DESC"
+    elif data_type == "news_items":
+        cols = ["news_id", "published_at", "title", "content", "url", "source"]
+        order = "published_at DESC"
+    elif data_type == "announcements":
+        cols = ["announcement_id", "published_at", "title", "content", "url", "source"]
+        order = "published_at DESC"
+    else:
+        raise ValueError(f"Unknown data_type: {data_type}")
+    return ", ".join(cols), cols, order  # type: ignore[return-value]
+
+
+def get_stock_data_page(
+    symbol: str,
+    source: str,
+    data_type: str,
+    page: int = 1,
+    page_size: int = 50,
+) -> tuple[list[dict[str, Any]], int, list[str]]:
+    """分页查看数据。返回 (rows, total, columns)。"""
+    table = _DATA_TYPE_TABLE.get(data_type)
+    if not table:
+        raise ValueError(f"Unknown data_type: {data_type}")
+
+    select_str, cols, order = _data_type_columns(data_type)  # type: ignore[misc]
+
+    with get_market_connection() as connection:
+        total_row = connection.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE symbol = ? AND source = ?",
+            [symbol, source],
+        ).fetchone()
+        total = total_row[0] if total_row else 0
+
+        offset = (page - 1) * page_size
+        rows = connection.execute(
+            f"""
+            SELECT {select_str} FROM {table}
+            WHERE symbol = ? AND source = ?
+            ORDER BY {order}
+            LIMIT ? OFFSET ?
+            """,
+            [symbol, source, page_size, offset],
+        ).fetchall()
+
+    return [dict(zip(cols, row)) for row in rows], total, cols
+
+
+def get_stock_data_all(
+    symbol: str,
+    source: str,
+    data_type: str,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """全量查询，用于 CSV 导出。返回 (rows, columns)。"""
+    table = _DATA_TYPE_TABLE.get(data_type)
+    if not table:
+        raise ValueError(f"Unknown data_type: {data_type}")
+
+    select_str, cols, order = _data_type_columns(data_type)  # type: ignore[misc]
+
+    with get_market_connection() as connection:
+        rows = connection.execute(
+            f"""
+            SELECT {select_str} FROM {table}
+            WHERE symbol = ? AND source = ?
+            ORDER BY {order}
+            """,
+            [symbol, source],
+        ).fetchall()
+
+    return [dict(zip(cols, row)) for row in rows], cols
+
+
+def delete_stock_data(symbol: str, source: str, data_type: str) -> int:
+    """删除指定 (symbol, source, data_type) 的数据，返回删除行数。"""
+    table = _DATA_TYPE_TABLE.get(data_type)
+    if not table:
+        raise ValueError(f"Unknown data_type: {data_type}")
+
+    with get_market_connection() as connection:
+        before = connection.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE symbol = ? AND source = ?",
+            [symbol, source],
+        ).fetchone()
+        count_before = before[0] if before else 0
+
+        connection.execute(
+            f"DELETE FROM {table} WHERE symbol = ? AND source = ?",
+            [symbol, source],
+        )
+
+    return count_before

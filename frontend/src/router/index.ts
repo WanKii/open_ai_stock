@@ -5,6 +5,7 @@ import HistoryView from "../views/HistoryView.vue";
 import LogsView from "../views/LogsView.vue";
 import SettingsView from "../views/SettingsView.vue";
 import SingleStockAnalysisView from "../views/SingleStockAnalysisView.vue";
+import StockDataView from "../views/StockDataView.vue";
 
 const router = createRouter({
   history: createWebHistory(),
@@ -51,6 +52,14 @@ const router = createRouter({
       meta: {
         title: "数据源",
         subtitle: "执行接口状态校验与手动同步，掌握本地数据基础。"
+      }
+    },
+    {
+      path: "/stock-data",
+      component: StockDataView,
+      meta: {
+        title: "股票数据",
+        subtitle: "查看与管理各数据源、各类型的股票数据。"
       }
     }
   ]

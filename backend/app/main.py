@@ -12,6 +12,7 @@ from app.api.analysis import router as analysis_router
 from app.api.logs import router as logs_router
 from app.api.settings import router as settings_router
 from app.api.sources import router as sources_router
+from app.api.stocks import router as stocks_router
 from app.api.sync import router as sync_router
 from app.core.config import load_settings
 from app.core.database import init_db
@@ -70,3 +71,4 @@ app.include_router(sync_router)
 app.include_router(settings_router)
 app.include_router(logs_router)
 app.include_router(sources_router)
+app.include_router(stocks_router)
