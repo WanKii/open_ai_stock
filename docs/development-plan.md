@@ -189,14 +189,70 @@ DuckDB：
 - cancelled
 
 ## 9. 开发阶段规划
-| 阶段 | 周期 | 目标产出 |
+| 阶段 | 周期 | 目标产出 | 截至 2026-04-09 完成度 |
+| --- | --- | --- | --- |
+| 阶段 0 | 3 天 | 项目初始化、目录规划、接口约定、基础 UI 框架 | ✅ 100% — 目录骨架、接口草案、基础路由布局全部完成 |
+| 阶段 1 | 5 天 | 系统设置页、配置读写、本地配置文件能力 | ✅ 100% — 3 Tab 设置页、TOML 读写、连接测试入口均已交付 |
+| 阶段 2 | 6 天 | 数据源适配器、手动同步、DuckDB 基础数据仓 | ⏳ ~50% — DuckDB 10 表+upsert 已建，同步闭环已通（fixture 数据），真实适配器未实现 |
+| 阶段 3 | 7 天 | 分析任务队列、Worker、Agent 编排、Prompt 快照 | ⏳ ~40% — 队列状态机+Worker+报告落库闭环已通（模拟引擎），LLM 编排未实现 |
+| 阶段 4 | 5 天 | 报告页、历史记录、日志查询、图表展示 | ✅ 100%（UI 层） — 报告仪表板、历史详情、日志筛选三页完整，待填充真实数据 |
+| 阶段 5 | 4 天 | 联调、测试、异常处理、发布说明 | ❌ 未开始 |
+
+## 10. 项目审计与改进建议（2026-04-09）
+
+基于对后端 ~1800 行 Python 和前端 ~1200 行 TypeScript/Vue 代码的全量审计，总结以下发现和建议。
+
+### 10.1 架构层优化（建议纳入 v0.1.0）
+
+| 编号 | 问题 | 当前现状 | 建议方案 |
+| --- | --- | --- | --- |
+| A-01 | 缺少全局异常处理 | `main.py` 无 `exception_handler`，未捕获异常返回 500 裸响应 | 添加 FastAPI `@app.exception_handler(Exception)` 返回统一 JSON 格式 `{code, message, detail}` |
+| A-02 | CORS 过于开放 | `allow_origins=["*"]` | 限制为 `["http://127.0.0.1:5173", "http://localhost:5173"]` |
+| A-03 | SQLite 并发写入风险 | 默认 journal 模式，多个 BackgroundTasks 可能锁冲突 | `database.py` 初始化时执行 `PRAGMA journal_mode=WAL` |
+| A-04 | DuckDB 连接无复用 | `market_store.py` 每次操作 `duckdb.connect()` | 引入 `@contextmanager` 上下文管理器，单进程内复用连接 |
+| A-05 | 配置缓存不刷新 | `load_settings()` 仅 `on_startup` 调用，PUT 后进程内仍为旧值 | `PUT /api/settings` 成功后调用 `reload_settings()` 刷新模块级缓存 |
+| A-06 | 任务无超时保护 | `process_analysis_task` / `process_sync_job` 无 timeout | 包裹 `asyncio.wait_for(..., timeout=300)` 并在超时时标记 failed |
+
+### 10.2 后端代码质量（建议纳入 v0.1.0）
+
+| 编号 | 问题 | 建议 |
 | --- | --- | --- |
-| 阶段 0 | 3 天 | 项目初始化、目录规划、接口约定、基础 UI 框架 |
-| 阶段 1 | 5 天 | 系统设置页、配置读写、本地配置文件能力 |
-| 阶段 2 | 6 天 | 数据源适配器、手动同步、DuckDB 基础数据仓 |
-| 阶段 3 | 7 天 | 分析任务队列、Worker、Agent 编排、Prompt 快照 |
-| 阶段 4 | 5 天 | 报告页、历史记录、日志查询、图表展示 |
-| 阶段 5 | 4 天 | 联调、测试、异常处理、发布说明 |
+| B-01 | 连接测试为硬编码 | `test_connection` 对 LLM 返回 `True`，应改为对 `base_url` 发 HEAD 请求验证可达性 |
+| B-02 | DuckDB 缺查询函数 | 补齐面向分析引擎的读取函数：`get_daily_quotes(symbol, days)` / `get_financials(symbol, quarters)` / `get_news(symbol, count)` |
+| B-03 | 股票代码后端校验不足 | API 层应对 symbol 做 6 位数字 + 可选后缀 (.SH/.SZ) 的正则校验 |
+| B-04 | 日志写入同步 | `add_operation_log` / `add_system_log` 为同步 SQLite 写入，高频调用可能拖慢请求，建议使用队列缓冲 |
+
+### 10.3 前端体验优化（v0.1.0 ~ v0.2.0）
+
+| 编号 | 问题 | 建议 |
+| --- | --- | --- |
+| C-01 | 加载状态缺失 | HistoryView / LogsView / DataSourcesView 加载时无 loading 动画，应添加骨架屏或 `v-loading` |
+| C-02 | 轮询请求未取消 | `SingleStockAnalysisView` 的 `pollTimer` 在 `onBeforeUnmount` 清除 interval，但未用 `AbortController` 取消进行中 fetch |
+| C-03 | 报告重复加载 | 切换队列任务时重复调用 `getAnalysisReport`，应在组件内用 Map 缓存已加载报告 |
+| C-04 | 同步按钮无防重复 | 数据源页连续点击同步按钮可创建重复任务，应加 debounce 或 loading 态 |
+| C-05 | Store 利用不足 | workspace store 仅 4 个统计数字，tasks / reports 状态未纳入 Pinia 维护，导致组件间数据不共享 |
+
+### 10.4 扩展建议（建议纳入 v0.2.0 候选）
+
+| 编号 | 建议 | 说明 |
+| --- | --- | --- |
+| D-01 | 股票代码搜索自动补全 | 输入框增加 from DuckDB `symbol_master` 的自动补全 |
+| D-02 | 分析进度可视化 | 展示当前哪个 Agent 正在执行，而非仅显示 `running` |
+| D-03 | 提示词版本管理 | `prompt_snapshots` 已有基础，补充 diff 对比和一键回滚 |
+| D-04 | 数据质量仪表板 | 数据源页增加各表行数、最新日期、数据覆盖率统计 |
+| D-05 | 分析成本预估 | 提交任务前根据深度+角色数预估 token 消耗和费用 |
+| D-06 | 页面加载骨架屏 | 列表页加载时显示骨架占位提升感知速度 |
+| D-07 | 防重复同步按钮 | 同步按钮点击后进入 loading 态，防止重复提交 |
+
+### 10.5 安全评估摘要
+
+| 风险项 | 当前状态 | 严重度 | 处理建议 |
+| --- | --- | --- | --- |
+| CORS 全开放 | `allow_origins=["*"]` | 高 | v0.1.0 收紧（A-02） |
+| SQL 注入 | 使用参数化查询，风险低 | 低 | 保持现状 |
+| 密钥明文存储 | `local_settings.toml` 存储 API Key | 中 | 单机 MVP 可接受，v0.2.0 考虑本地加密 |
+| 无速率限制 | 所有 API 无限流 | 中 | 单机 MVP 可接受，v0.2.0 考虑 slowapi |
+| 无认证授权 | 无用户认证 | 低 | 单机模式设计意图，v0.3.0 考虑 |
 
 总工期建议：`30 个自然日左右`
 
