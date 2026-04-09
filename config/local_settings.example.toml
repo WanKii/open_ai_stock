@@ -1,0 +1,50 @@
+[data_sources.tushare]
+enabled = false
+priority = 1
+token = ""
+base_url = "https://api.tushare.pro"
+supports = ["symbols", "quotes", "financials", "news"]
+
+[data_sources.akshare]
+enabled = true
+priority = 2
+token = ""
+base_url = "https://akshare.akfamily.xyz"
+supports = ["symbols", "quotes", "financials"]
+
+[data_sources.baostock]
+enabled = false
+priority = 3
+token = ""
+base_url = "http://www.baostock.com"
+supports = ["symbols", "quotes", "financials"]
+
+[llm_providers.openai]
+enabled = false
+base_url = "https://api.openai.com/v1"
+model = "gpt-4.1-mini"
+api_key = ""
+timeout = 60
+max_tokens = 4000
+
+[llm_providers.anthropic]
+enabled = false
+base_url = "https://api.anthropic.com"
+model = "claude-3-5-sonnet-latest"
+api_key = ""
+timeout = 60
+max_tokens = 4000
+
+[source_priority_by_dataset]
+quotes = ["tushare", "akshare", "baostock"]
+financials = ["tushare", "akshare", "baostock"]
+news = ["tushare", "akshare"]
+symbols = ["tushare", "akshare", "baostock"]
+
+[prompts]
+market_analyst = "你是一名A股市场分析师。请从宏观环境、市场风格、资金偏好、行业景气度角度评估该股票当前所处环境。"
+fundamental_analyst = "你是一名A股基本面分析师。请从财务质量、业务模式、竞争优势、估值合理性角度评估该股票。"
+news_analyst = "你是一名A股新闻分析师。请从最近新闻、公告、舆情事件和潜在催化剂角度评估该股票。"
+index_analyst = "你是一名A股大盘分析师。请结合主要指数和市场风险偏好判断系统性风险。"
+sector_analyst = "你是一名A股板块分析师。请从板块轮动、行业趋势、同业对比角度评估该股票。"
+final_summarizer = "你是一名投资研究总监。请汇总多个分析师的结论，输出辅助决策型总结，不构成投资建议。"
