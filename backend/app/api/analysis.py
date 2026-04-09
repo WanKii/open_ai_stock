@@ -5,7 +5,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException
 from app.core.config import load_settings
 from app.models.schemas import AnalysisReport, AnalysisTask, AnalysisTaskCreate, TaskCreatedResponse
 from app.services import repository
-from app.services.demo_engine import process_analysis_task
+from app.services.analysis_engine import process_analysis_task
 
 
 router = APIRouter(prefix="/api/analysis", tags=["analysis"])

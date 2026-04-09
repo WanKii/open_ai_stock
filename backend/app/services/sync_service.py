@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -16,6 +17,8 @@ from app.core.market_store import (
     upsert_news_items,
     upsert_symbol_master,
 )
+
+logger = logging.getLogger(__name__)
 
 
 DEFAULT_SYMBOL_FIXTURES = [
@@ -38,7 +41,8 @@ SOURCE_TOKEN_FIELDS = {
     "baostock": None,
 }
 
-LIVE_SYNC_IMPLEMENTED: set[str] = set()
+# 标记哪些数据源已实现真实适配器
+LIVE_SYNC_IMPLEMENTED: set[str] = {"akshare", "tushare", "baostock"}
 
 
 @dataclass
@@ -271,6 +275,109 @@ def _build_news_rows(symbol: str, source: str, count: int = 8) -> list[dict[str,
     return rows
 
 
+def _create_adapter(source_name: str, source_config: dict[str, Any]):
+    """根据数据源名称创建对应的适配器实例。"""
+    from app.services.adapters.base import DataSourceAdapter
+
+    if source_name == "akshare":
+        from app.services.adapters.akshare_adapter import AKShareAdapter
+        return AKShareAdapter()
+    elif source_name == "tushare":
+        from app.services.adapters.tushare_adapter import TushareAdapter
+        return TushareAdapter(token=source_config.get("token", ""))
+    elif source_name == "baostock":
+        from app.services.adapters.baostock_adapter import BaoStockAdapter
+        return BaoStockAdapter()
+    return None
+
+
+def _live_symbol_sync(adapter, source_name: str) -> tuple[int, int]:
+    """使用真实适配器同步股票列表。"""
+    updated_at = _utc_now()
+    raw_rows = adapter.fetch_symbol_list()
+    if not raw_rows:
+        return 0, 0
+
+    symbol_rows = [
+        {
+            "symbol": row["symbol"],
+            "exchange": row["exchange"],
+            "name": row["name"],
+            "listing_date": row.get("listing_date"),
+            "status": row.get("status", "listed"),
+            "source": source_name,
+            "updated_at": updated_at,
+        }
+        for row in raw_rows
+    ]
+    profile_rows = [
+        {
+            "symbol": row["symbol"],
+            "name": row["name"],
+            "industry": row.get("industry"),
+            "area": row.get("area"),
+            "listing_date": row.get("listing_date"),
+            "source": source_name,
+            "updated_at": updated_at,
+        }
+        for row in raw_rows
+    ]
+    symbol_count = upsert_symbol_master(symbol_rows)
+    profile_count = upsert_company_profiles(profile_rows)
+    return symbol_count, profile_count
+
+
+def _live_history_sync(adapter, symbols: list[str], source_name: str, days: int = 60) -> int:
+    """使用真实适配器同步历史行情。"""
+    updated_at = _utc_now()
+    end_date = _utc_now().date()
+    start_date = end_date - timedelta(days=int(days * 1.5))  # 多拉一些日历日覆盖交易日
+
+    all_rows: list[dict[str, Any]] = []
+    for symbol in symbols:
+        try:
+            rows = adapter.fetch_daily_quotes(symbol, start_date, end_date)
+            for row in rows:
+                row["source"] = source_name
+                row["updated_at"] = updated_at
+            all_rows.extend(rows)
+        except Exception as exc:
+            logger.warning("同步 %s 历史行情失败: %s", symbol, exc)
+    return upsert_daily_quotes(all_rows)
+
+
+def _live_financial_sync(adapter, symbols: list[str], source_name: str, periods: int = 6) -> int:
+    """使用真实适配器同步财务数据。"""
+    updated_at = _utc_now()
+    all_rows: list[dict[str, Any]] = []
+    for symbol in symbols:
+        try:
+            rows = adapter.fetch_financials(symbol, periods)
+            for row in rows:
+                row["source"] = source_name
+                row["updated_at"] = updated_at
+            all_rows.extend(rows)
+        except Exception as exc:
+            logger.warning("同步 %s 财务数据失败: %s", symbol, exc)
+    return upsert_financial_reports(all_rows)
+
+
+def _live_news_sync(adapter, symbols: list[str], source_name: str, count: int = 20) -> int:
+    """使用真实适配器同步新闻。"""
+    updated_at = _utc_now()
+    all_rows: list[dict[str, Any]] = []
+    for symbol in symbols:
+        try:
+            rows = adapter.fetch_news(symbol, count)
+            for row in rows:
+                row["source"] = source_name
+                row["updated_at"] = updated_at
+            all_rows.extend(rows)
+        except Exception as exc:
+            logger.warning("同步 %s 新闻失败: %s", symbol, exc)
+    return upsert_news_items(all_rows)
+
+
 def execute_sync_job(job: dict[str, Any]) -> SyncExecutionResult:
     settings = load_settings()
     source_name = job["source"]
@@ -280,10 +387,23 @@ def execute_sync_job(job: dict[str, Any]) -> SyncExecutionResult:
 
     runtime_status = describe_source_status(source_name, source_config)
     warnings: list[str] = []
-    if not runtime_status.live_mode:
+    use_live = runtime_status.live_mode
+
+    if not use_live:
         warnings.append(runtime_status.note)
 
+    # --- 健康检查 ---
     if job["job_type"] == "health_check":
+        if use_live:
+            adapter = _create_adapter(source_name, source_config)
+            if adapter:
+                ok, msg = adapter.test_connection()
+                summary = f"{source_name} 连接测试{'成功' if ok else '失败'}：{msg}"
+                return SyncExecutionResult(
+                    status="completed" if ok else "completed_with_warnings",
+                    summary=summary,
+                    warnings=[] if ok else [msg],
+                )
         summary = f"{source_name} 状态：{runtime_status.status}。{runtime_status.note}"
         return SyncExecutionResult(
             status="completed_with_warnings" if warnings else "completed",
@@ -294,23 +414,68 @@ def execute_sync_job(job: dict[str, Any]) -> SyncExecutionResult:
     if not init_market_store():
         raise RuntimeError("DuckDB 依赖不可用，无法初始化本地数据仓。")
 
+    adapter = _create_adapter(source_name, source_config) if use_live else None
+
+    # --- 股票基本信息同步 ---
     if job["job_type"] == "symbol_sync":
+        if adapter and use_live:
+            try:
+                symbol_count, profile_count = _live_symbol_sync(adapter, source_name)
+                summary = f"{source_name} 已从真实接口写入 {symbol_count} 条股票基础信息，更新 {profile_count} 条公司档案。"
+                return SyncExecutionResult(status="completed", summary=summary, warnings=[])
+            except Exception as exc:
+                logger.warning("真实同步失败，回退到 fixture: %s", exc)
+                warnings.append(f"真实同步失败（{exc}），已回退到内置示例数据。")
+
         symbol_rows = _build_symbol_rows(source_name)
         symbol_count = upsert_symbol_master(symbol_rows)
         profile_count = upsert_company_profiles(symbol_rows)
         summary = f"{source_name} 已写入 {symbol_count} 条股票基础信息，更新 {profile_count} 条公司档案。"
+
+    # --- 历史行情同步 ---
     elif job["job_type"] == "history_sync":
         symbols = _resolve_symbols(job)
+        if adapter and use_live:
+            try:
+                quote_count = _live_history_sync(adapter, symbols, source_name)
+                summary = f"{source_name} 已从真实接口同步 {len(symbols)} 只股票的历史行情，共写入 {quote_count} 条日线记录。"
+                return SyncExecutionResult(status="completed", summary=summary, warnings=[])
+            except Exception as exc:
+                logger.warning("真实同步失败，回退到 fixture: %s", exc)
+                warnings.append(f"真实同步失败（{exc}），已回退到内置示例数据。")
+
         quote_rows = [row for symbol in symbols for row in _build_quote_rows(symbol, source_name)]
         quote_count = upsert_daily_quotes(quote_rows)
         summary = f"{source_name} 已同步 {len(symbols)} 只股票的历史行情，共写入 {quote_count} 条日线记录。"
+
+    # --- 财务数据同步 ---
     elif job["job_type"] == "financial_sync":
         symbols = _resolve_symbols(job)
+        if adapter and use_live:
+            try:
+                report_count = _live_financial_sync(adapter, symbols, source_name)
+                summary = f"{source_name} 已从真实接口同步 {len(symbols)} 只股票的财务摘要，共写入 {report_count} 条财报记录。"
+                return SyncExecutionResult(status="completed", summary=summary, warnings=[])
+            except Exception as exc:
+                logger.warning("真实同步失败，回退到 fixture: %s", exc)
+                warnings.append(f"真实同步失败（{exc}），已回退到内置示例数据。")
+
         financial_rows = [row for symbol in symbols for row in _build_financial_rows(symbol, source_name)]
         report_count = upsert_financial_reports(financial_rows)
         summary = f"{source_name} 已同步 {len(symbols)} 只股票的财务摘要，共写入 {report_count} 条财报记录。"
+
+    # --- 新闻数据同步 ---
     elif job["job_type"] == "news_sync":
         symbols = _resolve_symbols(job)
+        if adapter and use_live:
+            try:
+                news_count = _live_news_sync(adapter, symbols, source_name)
+                summary = f"{source_name} 已从真实接口同步 {len(symbols)} 只股票的新闻，共写入 {news_count} 条新闻记录。"
+                return SyncExecutionResult(status="completed", summary=summary, warnings=[])
+            except Exception as exc:
+                logger.warning("真实同步失败，回退到 fixture: %s", exc)
+                warnings.append(f"真实同步失败（{exc}），已回退到内置示例数据。")
+
         news_rows = [row for symbol in symbols for row in _build_news_rows(symbol, source_name)]
         news_count = upsert_news_items(news_rows)
         summary = f"{source_name} 已同步 {len(symbols)} 只股票的新闻样本，共写入 {news_count} 条新闻记录。"
