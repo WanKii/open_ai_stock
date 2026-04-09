@@ -10,11 +10,12 @@ from app.api.sources import router as sources_router
 from app.api.sync import router as sync_router
 from app.core.config import load_settings
 from app.core.database import init_db
+from app.core.market_store import init_market_store
 
 
 app = FastAPI(
     title="A股 LLM 股票分析网站 API",
-    description="本地优先的 A 股智能分析后台服务。",
+    description="本地优先的 A 股智能分析后端服务。",
     version="0.1.0",
 )
 
@@ -30,6 +31,7 @@ app.add_middleware(
 @app.on_event("startup")
 def on_startup() -> None:
     init_db()
+    init_market_store()
     load_settings()
 
 

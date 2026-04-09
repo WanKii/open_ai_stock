@@ -5,6 +5,7 @@ from fastapi import APIRouter
 from app.core.config import load_settings, mask_secrets, merge_incoming_settings, save_settings
 from app.models.schemas import SystemSettings, TestConnectionRequest, TestConnectionResponse
 from app.services import repository
+from app.services.sync_service import describe_source_status
 
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
@@ -32,14 +33,16 @@ def test_connection(payload: TestConnectionRequest) -> TestConnectionResponse:
     if not config:
         return TestConnectionResponse(success=False, message="未找到对应配置。")
 
-    secret_field = "token" if payload.category == "data_source" else "api_key"
-    configured = bool(config.get(secret_field))
+    if payload.category == "data_source":
+        runtime_status = describe_source_status(payload.provider, config)
+        repository.add_operation_log("settings", "test_connection", "INFO", f"执行 {payload.provider} 数据源连接测试。")
+        return TestConnectionResponse(success=runtime_status.live_mode, message=runtime_status.note)
 
-    if not configured and payload.category == "llm_provider":
+    if not config.get("api_key"):
         return TestConnectionResponse(success=False, message=f"{payload.provider} 未配置 API Key。")
 
-    repository.add_operation_log("settings", "test_connection", "INFO", f"执行了 {payload.provider} 连接测试。")
+    repository.add_operation_log("settings", "test_connection", "INFO", f"执行 {payload.provider} 连接测试。")
     return TestConnectionResponse(
         success=True,
-        message=f"{payload.provider} 连接测试通过（当前为本地模拟校验）。" if configured or payload.category == "data_source" else f"{payload.provider} 未配置密钥。",
+        message=f"{payload.provider} 连接测试通过（当前仍为本地模拟校验）。",
     )

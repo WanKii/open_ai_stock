@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 from app.core.config import load_settings
 from app.services import repository
+from app.services.sync_service import execute_sync_job
 
 
 AGENT_LABELS = {
@@ -53,23 +54,24 @@ def _build_agent_report(task_id: str, symbol: str, depth: str, agent_type: str, 
         prompt_snapshots[0]["id"] if prompt_snapshots else "",
     )
 
+    direction = "偏积极" if score_delta >= 0 else "偏谨慎"
     return {
         "agent_type": agent_type,
         "status": "completed",
-        "summary": f"{label}认为 {symbol} 在 {depth} 档分析下呈现出偏{'积极' if score_delta >= 0 else '谨慎'}结构，建议结合仓位纪律观察后续确认信号。",
+        "summary": f"{label}认为 {symbol} 在 {depth} 档分析下呈现 {direction} 结构，建议结合仓位纪律继续确认。",
         "positives": [
-            f"{label}识别到近期存在 1-2 个利好催化点。",
-            f"{label}认为当前价格区间具备继续跟踪价值。",
+            f"{label}识别到近期存在 1 到 2 个正向催化点。",
+            f"{label}认为当前价格区间仍具备继续跟踪价值。",
         ],
         "risks": [
-            f"{label}提示该股对市场风格切换较敏感。",
-            f"{label}提醒关注高波动阶段的回撤放大。",
+            f"{label}提示该股对市场风格切换较为敏感。",
+            f"{label}提醒高波动阶段可能放大回撤。",
         ],
         "confidence": confidence,
         "score_delta": score_delta,
         "evidence": [
             f"{depth} 档数据包已覆盖关键字段。",
-            f"{label}完成了结构化结论抽取。",
+            f"{label}已完成结构化结论抽取。",
         ],
         "missing_data": [],
         "provider": provider,
@@ -101,11 +103,11 @@ def build_report(task: dict, settings: dict) -> dict:
         "overall_score": overall_score,
         "action_tag": action_tag,
         "confidence": confidence,
-        "thesis": f"{task['symbol']} 当前更适合作为{'重点观察标的' if overall_score >= 75 else '等待确认标的' if overall_score >= 60 else '风险控制优先标的'}，需要结合量价确认与后续公告进一步验证。",
+        "thesis": f"{task['symbol']} 当前更适合作为{('重点观察标的' if overall_score >= 75 else '等待确认标的' if overall_score >= 60 else '风险控制优先标的')}，需要结合量价与后续公告继续验证。",
         "bull_points": [
-            "多角色分析结果总体偏正向，未出现明显相互冲突。",
+            "多角色分析结果整体偏正向，未出现明显相互冲突。",
             "结构化报告认为当前观察价值高于短期放弃价值。",
-            "模拟行情快照显示近期趋势未破坏中枢。",
+            "模拟行情快照显示近期趋势仍保持中性偏强。",
         ],
         "bear_points": [
             "系统性波动仍可能放大利空消息影响。",
@@ -159,9 +161,17 @@ def process_sync_job(job_id: str) -> None:
 
     repository.update_sync_job(job_id, "running")
     repository.add_system_log("sync", "INFO", f"同步任务 {job_id} 开始执行。", job_id)
-    time.sleep(1.0)
 
-    result_summary = f"{job['source']} 已完成 {job['job_type']}，同步范围：{job['scope']}。"
-    repository.update_sync_job(job_id, "completed", result_summary=result_summary)
-    repository.add_operation_log("sync", "complete", "INFO", result_summary, job_id)
-    repository.add_system_log("sync", "INFO", f"同步任务 {job_id} 完成。", job_id)
+    try:
+        result = execute_sync_job(job)
+        log_level = "WARN" if result.status == "completed_with_warnings" else "INFO"
+        repository.update_sync_job(job_id, result.status, result_summary=result.summary)
+        repository.add_operation_log("sync", "complete", log_level, result.summary, job_id)
+        for warning in result.warnings:
+            repository.add_system_log("sync", "WARN", warning, job_id)
+        repository.add_system_log("sync", "INFO", f"同步任务 {job_id} 执行完成。", job_id)
+    except Exception as exc:
+        message = f"同步任务执行失败：{exc}"
+        repository.update_sync_job(job_id, "failed", result_summary=message)
+        repository.add_operation_log("sync", "failed", "ERROR", message, job_id)
+        repository.add_system_log("sync", "ERROR", message, job_id)
