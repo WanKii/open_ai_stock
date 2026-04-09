@@ -277,3 +277,208 @@ DuckDB：
 
 ## 12. 结论
 第一版以“单股分析闭环跑通”为唯一核心目标。只要任务提交、数据拉取、Agent 分析、总结落库、历史回看、日志追踪这 6 个环节完整闭环，就视为 MVP 达标。
+---
+
+## 13. 全面代码审计与改进建议（2026-04-10 深度审计）
+
+基于对后端 ~3500 行 Python（含适配器、LLM Provider）和前端 ~2000 行 TypeScript/Vue 代码的逐文件深度审计，按类别、优先级整理以下发现和建议。
+
+### 13.1 后端代码质量问题
+
+#### 严重问题（建议 v0.2.0 立即修复）
+
+| 编号 | 问题 | 文件 | 描述 | 建议方案 |
+| --- | --- | --- | --- | --- |
+| BE-01 | 新闻查询 N+1 | `market_store.py` | `get_news()` 返回个股+全市场（`__MARKET__`）新闻，数据量膨胀 | 增加 `LIMIT` 参数，按发布时间降序后截断；对 `__MARKET__` 新闻做独立缓存 |
+| BE-02 | 队列位置竞态条件 | `repository.py` | `create_task()` 中 `queue_position` 通过 `COUNT(*)` 计算后插入，并发下可能重复 | 使用 `BEGIN IMMEDIATE` 事务或 `INSERT ... SELECT COUNT(*)` 原子化 |
+| BE-03 | Tushare Token 全局污染 | `tushare_adapter.py` | `ts.set_token()` 修改全局状态，多实例会互相覆盖 | 改用 `tushare.pro_api(token=...)` 直接传参，避免全局 `set_token` |
+| BE-04 | LLM 线程无法终止 | `analysis_engine.py` | `worker.join(timeout=300)` 后若线程仍存活，无法杀死，持续泄漏资源 | 改用 `asyncio.wait_for()` + `httpx.AsyncClient(timeout=...)` 替代线程封装 |
+| BE-05 | JSON 提取正则脆弱 | `analysis_engine.py` | `_parse_agent_response()` 用正则匹配 ` ```json...``` `，嵌套 JSON 和格式偏差会失败 | 添加多级回退：先正则提取 → 再直接 `json.loads()` 整体 → 再提取第一个 `{...}` 块 |
+| BE-06 | 密钥硬编码在配置文件 | `config/local_settings.toml` | 含真实 Tushare Token 和 API Key，可能被 Git 提交 | 确保 `.gitignore` 包含 `local_settings.toml`，添加环境变量覆盖支持（`TUSHARE_TOKEN`、`OPENAI_API_KEY`） |
+
+#### 中等问题（建议 v0.2.0 ~ v0.3.0）
+
+| 编号 | 问题 | 文件 | 描述 | 建议方案 |
+| --- | --- | --- | --- | --- |
+| BE-07 | DuckDB TOCTOU 竞态 | `market_store.py` | `_get_shared_connection()` 锁外检查后才加锁创建连接 | 将检查移入锁内，使用 double-check locking 模式 |
+| BE-08 | 错误处理过度吞并 | 各适配器 | 所有 `except Exception` 均静默返回空列表，不区分网络错误、授权失败、数据不存在 | 按异常类型分级处理：`ConnectionError` → 报连接失败；`AuthenticationError` → 报 Token 无效 |
+| BE-09 | 数据删除无恢复机制 | `stocks.py` | `DELETE /{symbol}/data` 硬删除，无软删除/回收站 | 添加 `deleted_at` 软删除列，或在删除前自动备份到临时表 |
+| BE-10 | CSV 导出无 BOM | `stocks.py` | Windows Excel 打开 UTF-8 CSV 中文乱码 | 响应体前追加 UTF-8 BOM（`\xef\xbb\xbf`） |
+| BE-11 | 无 API 速率限制 | `main.py` | 所有接口无限流保护 | 引入 `slowapi` 中间件，按 IP 限制（如 60 req/min） |
+| BE-12 | 大盘指数硬编码 | `analysis_engine.py` | 沪深300 代码 `000300.SH` 和上证 `000001.SH` 硬编码 | 移入 `config/local_settings.toml` 的 `[analysis]` section，支持用户自定义 |
+| BE-13 | 分页大偏移性能差 | `stocks.py` | 使用 `OFFSET` 分页，page 值极大时扫描全表 | 对高页码场景改用 keyset pagination（基于 `trade_date` 游标） |
+
+#### 架构耦合问题
+
+| 编号 | 问题 | 描述 | 建议方案 |
+| --- | --- | --- | --- |
+| BE-14 | LLM/适配器工厂硬编码 | `_get_llm_provider()` 和 `_create_adapter()` 均用 if-elif 选择实现类 | 改为注册表模式：`LLM_REGISTRY = {"openai": OpenAIProvider, "anthropic": AnthropicProvider}` |
+| BE-15 | Agent 类型定义分散 | `schemas.py`、`analysis_engine.py`、`demo_engine.py` 各自定义 Agent 标签 | 统一移入 `models/schemas.py` 的 `AGENT_LABELS` 常量 |
+| BE-16 | 数据类型列表重复 | `stocks.py` 的 `_VALID_DATA_TYPES` vs `market_store.py` 的 `_DATA_TYPE_TABLE` | 统一为一处定义，其他模块引用 |
+| BE-17 | 无依赖注入 | LLM Provider / Adapter 直接 import + 实例化，Mock 测试困难 | 引入 FastAPI `Depends()` 注入或简单工厂，便于测试替换 |
+
+### 13.2 前端代码质量问题
+
+#### 高优先级（建议 v0.2.0 立即修复）
+
+| 编号 | 问题 | 文件 | 描述 | 建议方案 |
+| --- | --- | --- | --- | --- |
+| FE-01 | API 错误处理不统一 | `client.ts` | 无法区分 4xx/5xx/网络错误，所有错误均为 `throw new Error(text)` | 引入错误分类：`ApiError`（含 status code）、`NetworkError`、`TimeoutError`，全局拦截并 `ElMessage` |
+| FE-02 | SettingsView 空指针 | `SettingsView.vue` | `settings.data_sources` 在 `settings` 为 null 时会报错 | 模板中统一使用 `settings?.data_sources ?? {}` 安全访问 |
+| FE-03 | 路由无懒加载 | `router/index.ts` | 所有视图组件同步导入，影响首屏加载 | 改为 `() => import("../views/XXXView.vue")` 动态导入 |
+| FE-04 | Element Plus 全量导入 | `main.ts` | `import ElementPlus from "element-plus"` 全量注册，打包体积 ~300KB | 改为按需导入：`import { ElButton, ElTable, ... } from "element-plus"` 配合 `unplugin-vue-components` |
+| FE-05 | 缺少 404 路由 | `router/index.ts` | 访问不存在路径无 fallback | 添加 `{ path: "/:pathMatch(.*)*", component: NotFoundView }` |
+
+#### 中等优先级
+
+| 编号 | 问题 | 描述 | 建议方案 |
+| --- | --- | --- | --- |
+| FE-06 | Store 利用不足 | `workspace store` 仅存储 4 个统计数字，分析任务/日志/数据源状态未纳入 Pinia | 新增 `analysisStore`、`logStore`，实现跨页面数据共享和缓存 |
+| FE-07 | 缺少 composables 抽象 | 重复的 `async loadXXX() { loading=true; try{...} finally{loading=false} }` 出现 6+ 次 | 提取 `useAsync(fn)` composable；提取 `usePolling(fn, interval)` composable |
+| FE-08 | 常量定义分散 | Agent 标签映射、状态标签映射在多个组件中重复 | 新增 `src/utils/constants.ts` 统一管理 |
+| FE-09 | 缺少请求超时控制 | `client.ts` 的 `fetch` 调用无超时限制 | 在 `request()` 中添加 `AbortController` + `setTimeout` 超时取消（默认 30s） |
+| FE-10 | SyncJobsDrawer 轮询竞态 | `watch(autoRefresh)` 未同时监听 `props.visible`，visible 变 false 后可能继续轮询 | 改为 `watch([autoRefresh, () => props.visible], ...)` 双重守卫 |
+
+### 13.3 前端样式美化建议
+
+#### 13.3.1 暗色模式支持（建议 v0.2.0）
+
+当前仅支持亮色模式（`color-scheme: light`），建议新增系统跟随暗色模式：
+
+```css
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1a1a1a;
+    --paper: rgba(30, 30, 30, 0.8);
+    --ink: #f4ecdf;
+    --muted: #aaa;
+    --accent: #ff7a3d;
+    --border: rgba(255, 255, 255, 0.1);
+    --sidebar: linear-gradient(180deg, #0a0a0a, #1a1a1a);
+  }
+}
+```
+
+#### 13.3.2 页面过渡动画（建议 v0.2.0）
+
+当前页面切换无过渡效果，建议在 `App.vue` 的 `<RouterView>` 包裹 `<Transition>`：
+
+```vue
+<RouterView v-slot="{ Component }">
+  <Transition name="fade-slide" mode="out-in">
+    <component :is="Component" />
+  </Transition>
+</RouterView>
+```
+
+对应 CSS：
+```css
+.fade-slide-enter-active, .fade-slide-leave-active { transition: all 250ms ease; }
+.fade-slide-enter-from { opacity: 0; transform: translateX(12px); }
+.fade-slide-leave-to { opacity: 0; transform: translateX(-12px); }
+```
+
+#### 13.3.3 视觉层级优化（建议 v0.2.0）
+
+当前所有 `.panel` 卡片样式相同，缺少层级区分。建议引入三级面板：
+
+| 层级 | 用途 | 样式特征 |
+| --- | --- | --- |
+| `.panel--primary` | 主要信息（报告、分析结果） | 不透明白底 + 大阴影 |
+| `.panel--secondary` | 辅助信息（列表、历史） | 半透明 + 无阴影 |
+| `.panel--tertiary` | 次要信息（侧边统计） | 透明底 + 虚线边框 |
+
+#### 13.3.4 骨架屏加载（建议 v0.2.0）
+
+当前仅使用 Element Plus 的 `v-loading` 遮罩，体验生硬。建议为列表页引入骨架屏（shimmer 动画）：
+
+```css
+@keyframes shimmer {
+  0% { background-position: -1000px 0; }
+  100% { background-position: 1000px 0; }
+}
+.skeleton-card {
+  height: 80px; border-radius: 16px;
+  background: linear-gradient(90deg, #f0f0f0 0%, #fff 50%, #f0f0f0 100%);
+  background-size: 1000px 100%;
+  animation: shimmer 1.8s infinite;
+}
+```
+
+#### 13.3.5 微交互增强
+
+| 元素 | 当前状态 | 建议 |
+| --- | --- | --- |
+| StatusBadge | 静态展示 | 添加 `running` 状态的脉冲动画 `animation: pulse 2s infinite` |
+| 导航项 hover | 仅 `translateX(4px)` | 增加背景渐显 + 左侧 accent 色条指示器 |
+| 表格行 hover | 无效果 | 添加 `background` 行高亮 + 微弱 `translateY(-1px)` 浮起 |
+| 空状态 | 仅文字"暂无数据" | 添加 SVG 插图 + 引导文案 + CTA 按钮 |
+| 按钮点击 | 无反馈 | 添加 `transform: scale(0.97)` 按压效果 |
+| 图表卡片 | 静态矩形 | hover 时 `box-shadow` 增强 + 轻微放大 |
+
+#### 13.3.6 响应式改进
+
+| 问题 | 当前 | 建议 |
+| --- | --- | --- |
+| 缺少平板断点 | 三个断点 1440/1180/720px | 增加 768px（iPad）和 1024px（iPad Pro）断点 |
+| 小屏侧边栏 | 720px 以下改为 1fr 单列 | 改为 `position: fixed` 抽屉式侧边栏，默认收起 |
+| 超大屏幕 | 无上限 | 2560px 以上添加 `max-width` 居中，防止内容过宽 |
+
+#### 13.3.7 可访问性（a11y）
+
+| 问题 | 描述 | 建议 |
+| --- | --- | --- |
+| 缺少 ARIA | 导航缺 `aria-label`，活动项缺 `aria-current` | `<nav aria-label="主导航">` + `:aria-current="isActive ? 'page' : undefined"` |
+| 颜色对比度不足 | `--muted: #53645f` 在浅色背景上对比度 < 4.5:1 | 调深至 `#3d4e49`（WCAG AA 合规） |
+| 图表不可访问 | ECharts 图表无文本替代 | 为 PricePulseChart 添加 `aria-label="价格走势图"` + 隐藏数据表 |
+| 仅靠颜色区分状态 | StatusBadge 靠颜色标识可用/异常 | 同时使用图标标识：✓ 可用、⚠ 警告、✕ 异常 |
+| 键盘导航不完整 | Drawer 无焦点陷阱、无 Escape 关闭 | 使用 Element Plus 内置焦点管理或自定义 `useFocusTrap` |
+
+### 13.4 性能优化建议
+
+| 编号 | 问题 | 影响 | 建议方案 | 目标版本 |
+| --- | --- | --- | --- | --- |
+| PF-01 | 前端包体积 ~1.2MB（未压缩） | 首屏加载慢 | 路由懒加载 + Element Plus 按需导入 + ECharts tree-shaking | v0.2.0 |
+| PF-02 | DuckDB 全量 fetchall | 大数据量时内存溢出 | CSV 导出改用 Arrow streaming；分页查询改用 fetchmany | v0.2.0 |
+| PF-03 | 日志/历史列表无虚拟滚动 | 大数据集渲染卡顿 | 长列表引入 `el-table-v2`（Element Plus 虚拟化表格）或 `vue-virtual-scroller` | v0.2.0 |
+| PF-04 | SyncJobsDrawer 2s 轮询 | 频率过高，无条件渲染 | 根据任务状态动态调频：running 时 3s，idle 时 10s，completed 时停止 | v0.2.0 |
+| PF-05 | SQLite 无索引优化 | 日志/任务查询线性扫描 | 为 `operation_logs(task_id)` / `analysis_tasks(status, created_at)` 添加索引 | v0.2.0 |
+| PF-06 | LLM 并发无流控 | 多任务并发时 API 限流 | 引入 `asyncio.Semaphore` 限制同时 LLM 调用数（建议 ≤ 3） | v0.3.0 |
+
+### 13.5 扩展功能建议
+
+| 编号 | 功能 | 描述 | 优先级 | 目标版本 |
+| --- | --- | --- | --- | --- |
+| EX-01 | SSE/WebSocket 实时推送 | 替代前端轮询，分析任务状态和 Agent 进度实时推送 | P2 | v0.2.0 |
+| EX-02 | 多 LLM Provider 并行对比 | 同一分析任务同时调用 OpenAI 和 Anthropic，对比结论差异 | P3 | v0.3.0 |
+| EX-03 | 数据源健康监控面板 | 定期探测各数据源连接状态，展示可用性时间线 | P2 | v0.2.0 |
+| EX-04 | Prompt Playground | 在线编辑和测试 Prompt，即时预览 LLM 输出效果 | P3 | v0.3.0 |
+| EX-05 | 分析报告导出 | 支持导出 Markdown / PDF / HTML 格式的结构化报告 | P2 | v0.2.0 |
+| EX-06 | 环境变量覆盖机制 | 支持 `TUSHARE_TOKEN`、`OPENAI_API_KEY` 等环境变量覆盖 TOML 配置 | P1 | v0.2.0 |
+| EX-07 | 国际化基础设施 | 前端引入 `vue-i18n`，抽取所有硬编码中文为 locale key | P3 | v0.3.0+ |
+| EX-08 | 错误追踪集成 | 后端集成 Sentry 或等价方案，前端异常自动上报 | P3 | v0.3.0+ |
+
+### 13.6 安全加固建议
+
+| 编号 | 问题 | 当前状态 | 严重度 | 建议方案 |
+| --- | --- | --- | --- | --- |
+| SEC-01 | 密钥存储 | `local_settings.toml` 含明文 API Key | 高 | `.gitignore` 确认含 `local_settings.toml`；支持环境变量覆盖；日志脱敏 |
+| SEC-02 | CORS allow_methods | `allow_methods=["*"]` 过宽 | 中 | 收紧为 `["GET", "POST", "PUT", "DELETE", "OPTIONS"]` |
+| SEC-03 | 符号输入验证 | `normalize_symbol()` 未校验是否为 6 位数字 | 中 | 添加正则 `^[036]\d{5}(\.(SH\|SZ))?$` 验证 |
+| SEC-04 | 日志中密钥泄露 | 异常 traceback 可能含 Token | 中 | 日志 formatter 中增加密钥过滤器 |
+| SEC-05 | 无请求体大小限制 | POST 请求无 body size 限制 | 低 | 配置 Uvicorn `--limit-concurrency` 和 FastAPI 中间件限制请求体 |
+
+### 13.7 综合评分
+
+| 维度 | 后端 | 前端 | 综合 |
+| --- | --- | --- | --- |
+| 架构清晰度 | ⭐⭐⭐⭐ | ⭐⭐⭐☆ | 3.5/5 |
+| 代码质量 | ⭐⭐⭐☆ | ⭐⭐⭐⭐ | 3.5/5 |
+| 错误处理 | ⭐⭐⭐☆ | ⭐⭐☆☆ | 2.5/5 |
+| 可测试性 | ⭐⭐☆☆ | ⭐⭐☆☆ | 2/5 |
+| 安全性 | ⭐⭐⭐☆ | ⭐⭐⭐☆ | 3/5 |
+| 性能 | ⭐⭐⭐☆ | ⭐⭐☆☆ | 2.5/5 |
+| UI/UX 设计 | — | ⭐⭐⭐⭐ | 4/5 |
+| 可维护性 | ⭐⭐⭐☆ | ⭐⭐⭐☆ | 3/5 |
+
+**总体结论**：MVP 级别可发布，设计品味优秀。进入 v0.2.0 阶段应重点修复 BE-01~BE-06 和 FE-01~FE-05 的高优问题，同时落地暗色模式、页面过渡、骨架屏等样式提升。
