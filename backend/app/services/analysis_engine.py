@@ -494,9 +494,6 @@ def process_analysis_task(task_id: str) -> None:
     # 如果无可用 LLM，直接走 demo_engine 的同步路径
     if llm is None:
         logger.info("无可用 LLM，使用模拟引擎处理任务 %s", task_id)
-        from app.services.demo_engine import process_analysis_task as demo_process
-        # demo_engine 的 process 函数会重新设置 running 状态，这里需要避免重复
-        # 直接调用 build_report 并保存
         _run_demo_fallback(task_id, task, settings)
         return
 

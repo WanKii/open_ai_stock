@@ -22,7 +22,7 @@ export const useWorkspaceStore = defineStore("workspace", {
         ]);
 
         this.queuedCount = tasks.filter((task) => task.status === "queued" || task.status === "running").length;
-        this.completedCount = tasks.filter((task) => task.status === "completed").length;
+        this.completedCount = tasks.filter((task) => task.status === "completed" || task.status === "completed_with_warnings").length;
         this.sourcesOnline = statuses.filter((status) => status.status === "online").length;
         this.llmConfigured = Object.values(settings.llm_providers).filter((provider) => provider.configured).length;
       } finally {

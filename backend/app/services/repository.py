@@ -243,6 +243,9 @@ def add_system_log(module: str, level: str, message: str, task_id: str | None = 
 
 
 def list_logs(kind: str = "all", task_id: str | None = None, level: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    if kind not in ("all", "operation", "system"):
+        raise ValueError(f"无效的日志类型：{kind}")
+
     clauses: list[str] = []
     params: list[Any] = []
 

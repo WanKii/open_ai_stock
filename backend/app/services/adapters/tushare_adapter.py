@@ -196,6 +196,7 @@ class TushareAdapter(DataSourceAdapter):
         return rows
 
     def fetch_news(self, symbol: str, count: int = 20) -> list[dict[str, Any]]:
+        """获取新闻。注意：Tushare news 接口不支持按个股过滤，返回的是全市场新闻。"""
         pro = self._get_pro()
 
         try:
