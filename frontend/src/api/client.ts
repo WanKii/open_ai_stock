@@ -11,12 +11,13 @@ import type {
 const baseUrl = (import.meta.env.VITE_API_BASE_URL || "/api").replace(/\/$/, "");
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const { headers: customHeaders, ...rest } = init || {};
   const response = await fetch(`${baseUrl}${path}`, {
     headers: {
       "Content-Type": "application/json",
-      ...(init?.headers || {})
+      ...(customHeaders || {})
     },
-    ...init
+    ...rest
   });
 
   if (!response.ok) {

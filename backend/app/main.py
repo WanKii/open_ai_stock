@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,10 +19,20 @@ from app.core.market_store import init_market_store
 
 logger = logging.getLogger(__name__)
 
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    init_db()
+    init_market_store()
+    load_settings()
+    yield
+
+
 app = FastAPI(
     title="A股 LLM 股票分析网站 API",
     description="本地优先的 A 股智能分析后端服务。",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -46,13 +58,6 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
             "detail": str(exc) if app.debug else None,
         },
     )
-
-
-@app.on_event("startup")
-def on_startup() -> None:
-    init_db()
-    init_market_store()
-    load_settings()
 
 
 @app.get("/api/health")

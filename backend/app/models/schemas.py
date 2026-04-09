@@ -148,6 +148,10 @@ class DataSourceStatus(BaseModel):
     source: str
     enabled: bool
     configured: bool
+    priority: int = 0
+    supports: list[str] = Field(default_factory=list)
+    status: str = "unknown"
+    note: str = ""
     priority: int
     supports: list[str]
     status: str

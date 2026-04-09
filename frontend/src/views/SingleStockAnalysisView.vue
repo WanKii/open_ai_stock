@@ -203,6 +203,7 @@ const selectedTaskId = ref("");
 const activeReport = ref<AnalysisReport | null>(null);
 const submitting = ref(false);
 let pollTimer: number | undefined;
+let abortController: AbortController | null = null;
 
 const agentOptions = [
   { label: "市场分析师", value: "market_analyst" },
@@ -238,6 +239,10 @@ function stopPolling() {
     window.clearInterval(pollTimer);
     pollTimer = undefined;
   }
+  if (abortController) {
+    abortController.abort();
+    abortController = null;
+  }
 }
 
 async function loadReport(taskId: string) {
@@ -263,13 +268,19 @@ async function refreshTasks() {
 
 function startPolling(taskId: string) {
   stopPolling();
+  abortController = new AbortController();
   pollTimer = window.setInterval(async () => {
-    await refreshTasks();
-    const task = tasks.value.find((item) => item.id === taskId);
-    if (task && isTerminal(task.status)) {
-      stopPolling();
-      await loadReport(taskId);
-      await workspaceStore.refreshOverview();
+    if (abortController?.signal.aborted) return;
+    try {
+      await refreshTasks();
+      const task = tasks.value.find((item) => item.id === taskId);
+      if (task && isTerminal(task.status)) {
+        stopPolling();
+        await loadReport(taskId);
+        await workspaceStore.refreshOverview();
+      }
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
     }
   }, 1500);
 }
