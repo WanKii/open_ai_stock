@@ -452,7 +452,7 @@ def get_news(symbol: str, count: int = 20) -> list[dict[str, Any]]:
             """
             SELECT news_id, published_at, title, content, url, source
             FROM news_items
-            WHERE symbol = ?
+            WHERE symbol IN (?, '__MARKET__')
             ORDER BY published_at DESC
             LIMIT ?
             """,

@@ -58,21 +58,24 @@ class OpenAIProvider(LLMProvider):
         if not self._api_key:
             return False, "未配置 API Key。"
 
-        url = f"{self._base_url}/models"
+        url = f"{self._base_url}/chat/completions"
+        payload = {
+            "model": self._model,
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 1,
+        }
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                response = await client.get(url, headers=self._headers())
-                if response.status_code != 200:
-                    return False, f"OpenAI 返回状态码 {response.status_code}。"
-
-                # 验证配置的模型是否在可用列表中
-                data = response.json()
-                model_ids = {m.get("id") for m in data.get("data", [])}
-                if model_ids and self._model not in model_ids:
-                    return False, (
-                        f"连接正常，但模型 {self._model} 不在可用列表中。"
-                        f"可用模型示例: {', '.join(sorted(model_ids)[:5])}。"
-                    )
-                return True, f"OpenAI 连接正常，模型: {self._model}。"
+            async with httpx.AsyncClient(timeout=15) as client:
+                response = await client.post(
+                    url, headers=self._headers(), json=payload
+                )
+                if response.status_code == 200:
+                    return True, f"OpenAI 连接正常，模型: {self._model}。"
+                # 常见的模型不存在错误码
+                if response.status_code in (404, 400):
+                    body = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
+                    err_msg = body.get("error", {}).get("message", response.text[:200])
+                    return False, f"模型 {self._model} 不可用：{err_msg}"
+                return False, f"OpenAI 返回状态码 {response.status_code}。"
         except Exception as exc:
             return False, f"OpenAI 连接失败：{exc}"

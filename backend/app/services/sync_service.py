@@ -364,17 +364,27 @@ def _live_financial_sync(adapter, symbols: list[str], source_name: str, periods:
     return upsert_financial_reports(all_rows)
 
 
+# 全市场新闻使用此标记符号存储，get_news 查询时会自动包含
+MARKET_WIDE_NEWS_SYMBOL = "__MARKET__"
+
+
 def _live_news_sync(adapter, symbols: list[str], source_name: str, count: int = 20) -> int:
     """使用真实适配器同步新闻。"""
     updated_at = _utc_now()
     all_rows: list[dict[str, Any]] = []
 
     if not adapter.news_is_symbol_specific:
-        # 此数据源返回全市场新闻，不按个股过滤，跳过以避免存入无关新闻。
-        logger.info(
-            "%s 新闻接口不支持按个股过滤，已跳过新闻同步。", source_name
-        )
-        return 0
+        # 此数据源返回全市场新闻，获取一次并标记为市场级新闻。
+        try:
+            rows = adapter.fetch_news(MARKET_WIDE_NEWS_SYMBOL, count)
+            for row in rows:
+                row["symbol"] = MARKET_WIDE_NEWS_SYMBOL
+                row["source"] = source_name
+                row["updated_at"] = updated_at
+            all_rows.extend(rows)
+        except Exception as exc:
+            logger.warning("同步全市场新闻失败: %s", exc)
+        return upsert_news_items(all_rows)
 
     for symbol in symbols:
         try:

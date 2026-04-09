@@ -67,7 +67,7 @@
           </div>
           <StatusBadge
             :label="statusLabelMap[task.status]"
-            :tone="task.status === 'completed' ? 'good' : task.status === 'failed' ? 'danger' : 'warn'"
+            :tone="isReportReady(task.status) ? 'good' : task.status === 'failed' ? 'danger' : 'warn'"
           />
         </button>
       </div>
@@ -82,8 +82,8 @@
         </div>
         <StatusBadge
           v-if="selectedTask"
-          :label="selectedTask.status === 'completed' ? '报告已就绪' : '等待生成中'"
-          :tone="selectedTask.status === 'completed' ? 'good' : 'warn'"
+          :label="isReportReady(selectedTask.status) ? '报告已就绪' : '等待生成中'"
+          :tone="isReportReady(selectedTask.status) ? 'good' : 'warn'"
         />
       </div>
 
@@ -232,6 +232,10 @@ const selectedTask = computed(() => tasks.value.find((task) => task.id === selec
 
 function isTerminal(status: string) {
   return ["completed", "completed_with_warnings", "failed", "cancelled"].includes(status);
+}
+
+function isReportReady(status: string) {
+  return status === "completed" || status === "completed_with_warnings";
 }
 
 function stopPolling() {
