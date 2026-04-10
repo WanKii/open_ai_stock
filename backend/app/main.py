@@ -16,7 +16,7 @@ from app.api.stocks import router as stocks_router
 from app.api.sync import router as sync_router
 from app.core.config import load_settings
 from app.core.database import init_db
-from app.core.market_store import init_market_store
+from app.core.market_store import MarketStoreUnavailableError, init_market_store
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +24,10 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     init_db()
-    init_market_store()
+    if not init_market_store():
+        logger.warning(
+            "DuckDB is unavailable. Market data endpoints will return 503 until the dependency is installed."
+        )
     load_settings()
     yield
 
@@ -57,6 +60,19 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
             "code": "INTERNAL_ERROR",
             "message": "服务器内部错误，请稍后重试。",
             "detail": str(exc) if app.debug else None,
+        },
+    )
+
+
+@app.exception_handler(MarketStoreUnavailableError)
+async def market_store_unavailable_handler(
+    _request: Request, exc: MarketStoreUnavailableError
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        content={
+            "code": "MARKET_STORE_UNAVAILABLE",
+            "message": str(exc),
         },
     )
 

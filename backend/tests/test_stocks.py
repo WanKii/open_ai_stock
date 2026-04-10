@@ -3,7 +3,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from app.core import market_store
 from app.core.market_store import (
+    close_market_connection,
     get_market_connection,
     upsert_daily_quotes,
     upsert_financial_reports,
@@ -76,6 +78,24 @@ def test_list_stocks_search(client):
     data = resp.json()
     assert data["total"] >= 1
     assert data["items"][0]["name"] == "平安银行"
+
+
+def test_list_stocks_returns_503_when_duckdb_missing(client, monkeypatch):
+    close_market_connection()
+
+    def _raise_missing_duckdb():
+        raise market_store.MarketStoreUnavailableError(market_store.DUCKDB_UNAVAILABLE_MESSAGE)
+
+    monkeypatch.setattr(market_store, "_import_duckdb", _raise_missing_duckdb)
+
+    resp = client.get("/api/stocks")
+
+    assert resp.status_code == 503
+    data = resp.json()
+    assert data["code"] == "MARKET_STORE_UNAVAILABLE"
+    assert "DuckDB" in data["message"]
+
+    close_market_connection()
 
 
 # ---- Data summary ----

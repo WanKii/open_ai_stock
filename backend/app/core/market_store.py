@@ -108,8 +108,21 @@ CREATE TABLE IF NOT EXISTS sector_daily (
 """
 
 
+DUCKDB_UNAVAILABLE_MESSAGE = (
+    "DuckDB 依赖未安装，市场数据功能不可用。"
+    "请使用项目虚拟环境启动，或先执行 `pip install -r backend/requirements.txt`。"
+)
+
+
+class MarketStoreUnavailableError(RuntimeError):
+    """Raised when the local DuckDB-backed market store cannot be used."""
+
+
 def _import_duckdb():
-    import duckdb
+    try:
+        import duckdb
+    except ModuleNotFoundError as exc:
+        raise MarketStoreUnavailableError(DUCKDB_UNAVAILABLE_MESSAGE) from exc
 
     return duckdb
 
@@ -146,7 +159,7 @@ def init_market_store() -> bool:
         with get_market_connection() as connection:
             connection.execute(SCHEMA_SQL)
         return True
-    except ModuleNotFoundError:
+    except MarketStoreUnavailableError:
         return False
 
 
