@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -135,16 +136,19 @@ def save_settings(settings: dict[str, Any]) -> dict[str, Any]:
     merged = _deep_merge(DEFAULT_SETTINGS, settings)
     SETTINGS_PATH.write_text(render_settings_toml(merged), encoding="utf-8")
     _settings_cache = merged
-    return merged
+    return copy.deepcopy(merged)
 
 
-def load_settings() -> dict[str, Any]:
+def _load_persisted_settings() -> dict[str, Any]:
+    """加载磁盘配置并缓存，不包含运行时环境变量覆盖。"""
     global _settings_cache
     if _settings_cache is not None:
         return copy.deepcopy(_settings_cache)
+
     ensure_project_dirs()
     if not SETTINGS_PATH.exists():
-        return save_settings(DEFAULT_SETTINGS)
+        save_settings(DEFAULT_SETTINGS)
+        return copy.deepcopy(_settings_cache or DEFAULT_SETTINGS)
 
     with SETTINGS_PATH.open("rb") as handle:
         loaded = tomllib.load(handle)
@@ -153,10 +157,46 @@ def load_settings() -> dict[str, Any]:
     return copy.deepcopy(_settings_cache)
 
 
+def load_settings() -> dict[str, Any]:
+    runtime_settings = _load_persisted_settings()
+    _apply_env_overrides(runtime_settings)
+    return runtime_settings
+
+
 def reload_settings() -> dict[str, Any]:
     global _settings_cache
     _settings_cache = None
     return load_settings()
+
+
+# ---------------------------------------------------------------------------
+# 环境变量覆盖 — 支持通过 ENV 覆盖 TOML 中的敏感字段
+# ---------------------------------------------------------------------------
+
+_ENV_OVERRIDES: list[tuple[str, list[str]]] = [
+    ("TUSHARE_TOKEN", ["data_sources", "tushare", "token"]),
+    ("AKSHARE_TOKEN", ["data_sources", "akshare", "token"]),
+    ("BAOSTOCK_TOKEN", ["data_sources", "baostock", "token"]),
+    ("OPENAI_API_KEY", ["llm_providers", "openai", "api_key"]),
+    ("OPENAI_BASE_URL", ["llm_providers", "openai", "base_url"]),
+    ("OPENAI_MODEL", ["llm_providers", "openai", "model"]),
+    ("ANTHROPIC_API_KEY", ["llm_providers", "anthropic", "api_key"]),
+    ("ANTHROPIC_BASE_URL", ["llm_providers", "anthropic", "base_url"]),
+    ("ANTHROPIC_MODEL", ["llm_providers", "anthropic", "model"]),
+]
+
+
+def _apply_env_overrides(settings: dict[str, Any]) -> dict[str, Any]:
+    """将环境变量覆盖到 settings 中（仅当环境变量非空时生效）。"""
+    for env_key, path in _ENV_OVERRIDES:
+        value = os.environ.get(env_key, "").strip()
+        if not value:
+            continue
+        node = settings
+        for part in path[:-1]:
+            node = node.setdefault(part, {})
+        node[path[-1]] = value
+    return settings
 
 
 def mask_secrets(settings: dict[str, Any]) -> dict[str, Any]:
@@ -177,7 +217,7 @@ def mask_secrets(settings: dict[str, Any]) -> dict[str, Any]:
 
 
 def merge_incoming_settings(payload: dict[str, Any]) -> dict[str, Any]:
-    current = load_settings()
+    current = _load_persisted_settings()
 
     for group_name in ("data_sources", "llm_providers"):
         for item_key, item_value in payload.get(group_name, {}).items():

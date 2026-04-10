@@ -1,5 +1,5 @@
 <template>
-  <div v-loading="loading" class="panel">
+  <div class="panel">
     <div class="panel__header">
       <div>
         <p class="eyebrow">TRACE CENTER</p>
@@ -23,7 +23,12 @@
       <el-button type="primary" @click="loadLogsData">查询</el-button>
     </div>
 
-    <div class="log-list">
+    <template v-if="loading">
+      <div class="skeleton-grid">
+        <div v-for="i in 8" :key="i" class="skeleton-card skeleton-card--short" />
+      </div>
+    </template>
+    <div v-else class="log-list">
       <article v-for="entry in logs" :key="`${entry.module}-${entry.id}-${entry.created_at}`" class="log-item">
         <div class="log-item__meta">
           <StatusBadge :label="entry.level" :tone="entry.level === 'ERROR' ? 'danger' : entry.level === 'WARNING' ? 'warn' : 'good'" />

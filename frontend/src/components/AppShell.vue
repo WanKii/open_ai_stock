@@ -66,7 +66,11 @@
       </header>
 
       <section class="page-body">
-        <RouterView />
+        <RouterView v-slot="{ Component }">
+          <Transition name="page-fade" mode="out-in">
+            <component :is="Component" />
+          </Transition>
+        </RouterView>
       </section>
     </main>
   </div>

@@ -13,19 +13,74 @@ import type {
 
 const baseUrl = (import.meta.env.VITE_API_BASE_URL || "/api").replace(/\/$/, "");
 
+// ---------------------------------------------------------------------------
+// Error classification
+// ---------------------------------------------------------------------------
+
+export class ApiError extends Error {
+  status: number;
+  code: string;
+  constructor(status: number, message: string, code = "API_ERROR") {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
+export class NetworkError extends Error {
+  constructor(message = "网络连接失败，请检查后端服务是否启动。") {
+    super(message);
+    this.name = "NetworkError";
+  }
+}
+
+const REQUEST_TIMEOUT_MS = 30_000;
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const { headers: customHeaders, ...rest } = init || {};
-  const response = await fetch(`${baseUrl}${path}`, {
-    headers: {
-      "Content-Type": "application/json",
-      ...(customHeaders || {})
-    },
-    ...rest
-  });
+  const { headers: customHeaders, signal: externalSignal, ...rest } = init || {};
+
+  // Timeout via AbortController
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+  // Merge external signal (if any)
+  if (externalSignal) {
+    externalSignal.addEventListener("abort", () => controller.abort());
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl}${path}`, {
+      headers: {
+        "Content-Type": "application/json",
+        ...(customHeaders || {})
+      },
+      signal: controller.signal,
+      ...rest
+    });
+  } catch (err) {
+    clearTimeout(timeoutId);
+    if (err instanceof DOMException && err.name === "AbortError") {
+      if (externalSignal?.aborted) throw err; // caller-initiated abort, re-throw
+      throw new NetworkError("请求超时，请稍后重试。");
+    }
+    throw new NetworkError();
+  } finally {
+    clearTimeout(timeoutId);
+  }
 
   if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || "请求失败");
+    let message = "请求失败";
+    let code = "API_ERROR";
+    try {
+      const body = await response.json();
+      message = body.message || body.detail || JSON.stringify(body);
+      code = body.code || code;
+    } catch {
+      message = (await response.text()) || `HTTP ${response.status}`;
+    }
+    throw new ApiError(response.status, message, code);
   }
 
   return response.json() as Promise<T>;

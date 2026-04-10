@@ -448,12 +448,16 @@ def get_financials(symbol: str, quarters: int = 4) -> list[dict[str, Any]]:
 
 def get_news(symbol: str, count: int = 20) -> list[dict[str, Any]]:
     with get_market_connection() as connection:
+        # 优先取个股新闻，再补全市场新闻，合计不超过 count 条
         rows = connection.execute(
             """
             SELECT news_id, published_at, title, content, url, source
-            FROM news_items
-            WHERE symbol IN (?, '__MARKET__')
-            ORDER BY published_at DESC
+            FROM (
+                SELECT *, 0 AS priority FROM news_items WHERE symbol = ?
+                UNION ALL
+                SELECT *, 1 AS priority FROM news_items WHERE symbol = '__MARKET__'
+            ) sub
+            ORDER BY priority ASC, published_at DESC
             LIMIT ?
             """,
             [symbol, count],

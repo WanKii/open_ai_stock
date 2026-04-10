@@ -87,6 +87,7 @@
           <StatusBadge
             :label="statusLabelMap[task.status]"
             :tone="isReportReady(task.status) ? 'good' : task.status === 'failed' ? 'danger' : 'warn'"
+            :pulse="task.status === 'running'"
           />
         </button>
       </div>

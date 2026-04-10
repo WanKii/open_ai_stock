@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from app.core.config import (
+    SETTINGS_PATH,
     _deep_merge,
     load_settings,
     mask_secrets,
@@ -32,6 +33,17 @@ def test_load_settings_returns_defaults_on_first_run():
     assert "llm_providers" in settings
     assert "prompts" in settings
     assert len(settings["prompts"]) >= 6
+
+
+def test_load_settings_applies_env_overrides_on_first_run(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "env-openai-key")
+    if SETTINGS_PATH.exists():
+        SETTINGS_PATH.unlink()
+
+    settings = reload_settings()
+
+    assert settings["llm_providers"]["openai"]["api_key"] == "env-openai-key"
+    assert "env-openai-key" not in SETTINGS_PATH.read_text(encoding="utf-8")
 
 
 def test_save_and_reload_settings():
@@ -70,6 +82,22 @@ def test_merge_incoming_preserves_real_secret():
     # Simulate frontend sending masked value
     merged = merge_incoming_settings({"data_sources": {"tushare": {"token": "******"}}})
     assert merged["data_sources"]["tushare"]["token"] == "real_secret"
+
+
+def test_merge_incoming_does_not_persist_env_secret(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "env-openai-key")
+    save_settings({})
+    reload_settings()
+
+    merged = merge_incoming_settings({"prompts": {"market_analyst": "env-safe-update"}})
+
+    assert merged["llm_providers"]["openai"]["api_key"] == ""
+
+    save_settings(merged)
+    runtime_settings = reload_settings()
+
+    assert runtime_settings["llm_providers"]["openai"]["api_key"] == "env-openai-key"
+    assert "env-openai-key" not in SETTINGS_PATH.read_text(encoding="utf-8")
 
 
 def test_render_settings_toml_round_trip():

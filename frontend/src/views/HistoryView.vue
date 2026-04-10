@@ -1,6 +1,6 @@
 <template>
   <div class="workspace-grid workspace-grid--history">
-    <section v-loading="historyLoading" class="panel">
+    <section class="panel">
       <div class="panel__header">
         <div>
           <p class="eyebrow">ARCHIVE</p>
@@ -19,7 +19,12 @@
         </el-select>
       </div>
 
-      <el-table :data="filteredTasks" height="540" @row-click="selectTask">
+      <template v-if="historyLoading">
+        <div class="skeleton-grid">
+          <div v-for="i in 6" :key="i" class="skeleton-card" />
+        </div>
+      </template>
+      <el-table v-else :data="filteredTasks" height="540" @row-click="selectTask">
         <el-table-column prop="symbol" label="股票代码" min-width="140" />
         <el-table-column prop="depth" label="深度" min-width="90" />
         <el-table-column prop="status" label="状态" min-width="120" />

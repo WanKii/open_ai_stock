@@ -21,10 +21,10 @@ def get_settings() -> SystemSettings:
 @router.put("", response_model=SystemSettings)
 def update_settings(payload: dict) -> SystemSettings:
     merged = merge_incoming_settings(payload)
-    saved = save_settings(merged)
-    reload_settings()
+    save_settings(merged)
+    current = reload_settings()
     repository.add_operation_log("settings", "update", "INFO", "系统配置已更新。")
-    return SystemSettings.model_validate(mask_secrets(saved))
+    return SystemSettings.model_validate(mask_secrets(current))
 
 
 @router.post("/test-connection", response_model=TestConnectionResponse)

@@ -55,3 +55,21 @@ def test_update_settings_preserves_masked_secret(client):
     from app.core.config import reload_settings
     raw = reload_settings()
     assert raw["data_sources"]["tushare"]["token"] == "real_token_123"
+
+
+def test_update_settings_does_not_write_env_secret_to_file(client, monkeypatch):
+    from app.core.config import SETTINGS_PATH, reload_settings
+
+    monkeypatch.setenv("OPENAI_API_KEY", "env-openai-key")
+    reload_settings()
+
+    resp = client.put(
+        "/api/settings",
+        json={"prompts": {"market_analyst": "env-backed prompt"}},
+    )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["llm_providers"]["openai"]["configured"] is True
+    assert payload["llm_providers"]["openai"]["api_key"] == "******"
+    assert "env-openai-key" not in SETTINGS_PATH.read_text(encoding="utf-8")

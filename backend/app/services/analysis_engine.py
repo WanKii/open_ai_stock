@@ -214,18 +214,39 @@ AGENT_RESPONSE_SCHEMA = """\
 
 
 def _parse_agent_response(raw: str) -> dict[str, Any]:
-    """从 LLM 回复中提取 JSON 结构。"""
-    # 尝试提取 ```json ... ``` 中的内容
-    match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.DOTALL)
+    """从 LLM 回复中提取 JSON 结构，多级回退策略。"""
+    # 1. 尝试提取 ```json ... ``` 中的内容（贪婪匹配最外层花括号）
+    match = re.search(r"```(?:json)?\s*(\{[\s\S]*\})\s*```", raw)
     if match:
-        return json.loads(match.group(1))
+        try:
+            return json.loads(match.group(1))
+        except json.JSONDecodeError:
+            pass
 
-    # 尝试直接解析
+    # 2. 尝试直接解析整体为 JSON
     stripped = raw.strip()
     if stripped.startswith("{"):
-        return json.loads(stripped)
+        try:
+            return json.loads(stripped)
+        except json.JSONDecodeError:
+            pass
 
-    # 回退到默认结构
+    # 3. 尝试提取第一个完整的 {...} 块（平衡花括号）
+    brace_start = raw.find("{")
+    if brace_start != -1:
+        depth = 0
+        for i in range(brace_start, len(raw)):
+            if raw[i] == "{":
+                depth += 1
+            elif raw[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(raw[brace_start : i + 1])
+                    except json.JSONDecodeError:
+                        break
+
+    # 4. 回退到默认结构
     return {
         "summary": raw[:500],
         "positives": [],
@@ -337,14 +358,7 @@ async def _call_summarizer(
 
     try:
         raw = await llm.chat(system_prompt, user_message)
-        # 解析
-        match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.DOTALL)
-        if match:
-            parsed = json.loads(match.group(1))
-        elif raw.strip().startswith("{"):
-            parsed = json.loads(raw.strip())
-        else:
-            parsed = {}
+        parsed = _parse_agent_response(raw)  # 复用多级回退解析
     except Exception as exc:
         logger.error("总结 Agent 调用失败: %s", exc)
         parsed = {}

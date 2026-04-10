@@ -1,12 +1,5 @@
 import { createRouter, createWebHistory } from "vue-router";
 
-import DataSourcesView from "../views/DataSourcesView.vue";
-import HistoryView from "../views/HistoryView.vue";
-import LogsView from "../views/LogsView.vue";
-import SettingsView from "../views/SettingsView.vue";
-import SingleStockAnalysisView from "../views/SingleStockAnalysisView.vue";
-import StockDataView from "../views/StockDataView.vue";
-
 const router = createRouter({
   history: createWebHistory(),
   routes: [
@@ -16,7 +9,7 @@ const router = createRouter({
     },
     {
       path: "/analysis",
-      component: SingleStockAnalysisView,
+      component: () => import("../views/SingleStockAnalysisView.vue"),
       meta: {
         title: "单股分析",
         subtitle: "输入股票代码，调度多角色 Agent 生成结构化结论。"
@@ -24,7 +17,7 @@ const router = createRouter({
     },
     {
       path: "/history",
-      component: HistoryView,
+      component: () => import("../views/HistoryView.vue"),
       meta: {
         title: "历史分析记录",
         subtitle: "回看历史任务、最终总结和每个 Agent 的原始判断。"
@@ -32,7 +25,7 @@ const router = createRouter({
     },
     {
       path: "/settings",
-      component: SettingsView,
+      component: () => import("../views/SettingsView.vue"),
       meta: {
         title: "系统设置",
         subtitle: "管理数据源优先级、大模型连接和提示词模板。"
@@ -40,7 +33,7 @@ const router = createRouter({
     },
     {
       path: "/logs",
-      component: LogsView,
+      component: () => import("../views/LogsView.vue"),
       meta: {
         title: "日志",
         subtitle: "查看操作日志与系统日志，定位任务状态变化。"
@@ -48,7 +41,7 @@ const router = createRouter({
     },
     {
       path: "/sources",
-      component: DataSourcesView,
+      component: () => import("../views/DataSourcesView.vue"),
       meta: {
         title: "数据源",
         subtitle: "执行接口状态校验与手动同步，掌握本地数据基础。"
@@ -56,10 +49,18 @@ const router = createRouter({
     },
     {
       path: "/stock-data",
-      component: StockDataView,
+      component: () => import("../views/StockDataView.vue"),
       meta: {
         title: "股票数据",
         subtitle: "查看与管理各数据源、各类型的股票数据。"
+      }
+    },
+    {
+      path: "/:pathMatch(.*)*",
+      component: () => import("../views/NotFoundView.vue"),
+      meta: {
+        title: "页面不存在",
+        subtitle: "当前访问的路径不存在。"
       }
     }
   ]

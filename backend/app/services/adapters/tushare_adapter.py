@@ -31,8 +31,7 @@ class TushareAdapter(DataSourceAdapter):
     def _get_pro(self):
         if self._pro is None:
             ts = _import_tushare()
-            ts.set_token(self._token)
-            self._pro = ts.pro_api()
+            self._pro = ts.pro_api(token=self._token)
         return self._pro
 
     def test_connection(self) -> tuple[bool, str]:

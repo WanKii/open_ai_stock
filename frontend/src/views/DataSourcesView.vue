@@ -1,6 +1,6 @@
 <template>
   <div class="workspace-grid workspace-grid--sources">
-    <section v-loading="loading" class="panel">
+    <section class="panel">
       <div class="panel__header">
         <div>
           <p class="eyebrow">SOURCE MATRIX</p>
@@ -9,7 +9,12 @@
         <el-button text @click="loadSourceData">刷新</el-button>
       </div>
 
-      <div class="config-grid">
+      <template v-if="loading">
+        <div class="skeleton-grid" style="grid-template-columns: repeat(auto-fit, minmax(280px, 1fr))">
+          <div v-for="i in 3" :key="i" class="skeleton-card skeleton-card--tall" />
+        </div>
+      </template>
+      <div v-else class="config-grid">
         <article v-for="source in statuses" :key="source.source" class="config-card">
           <div class="config-card__header">
             <div>
@@ -73,7 +78,7 @@
       </div>
     </section>
 
-    <section v-loading="loading" class="panel">
+    <section class="panel">
       <div class="panel__header">
         <div>
           <p class="eyebrow">SYNC JOBS</p>
@@ -81,7 +86,12 @@
         </div>
       </div>
 
-      <el-table :data="jobs" height="520">
+      <template v-if="loading">
+        <div class="skeleton-grid">
+          <div v-for="i in 4" :key="i" class="skeleton-card skeleton-card--short" />
+        </div>
+      </template>
+      <el-table v-else :data="jobs" height="520">
         <el-table-column prop="source" label="数据源" min-width="110" />
         <el-table-column prop="job_type" label="任务类型" min-width="140" />
         <el-table-column prop="status" label="状态" min-width="100" />

@@ -102,6 +102,7 @@ def create_task(symbol: str, depth: str, selected_agents: list[str]) -> dict[str
     created_at = utc_now()
 
     with get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
         queue_position = (
             connection.execute(
                 """
@@ -121,6 +122,7 @@ def create_task(symbol: str, depth: str, selected_agents: list[str]) -> dict[str
             """,
             (task_id, symbol, depth, json.dumps(selected_agents, ensure_ascii=False), queue_position, created_at),
         )
+        connection.execute("COMMIT")
 
     refresh_queue_positions()
     return get_task(task_id)
