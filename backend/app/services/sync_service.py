@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-import hashlib
 import importlib.util
 import logging
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
-from typing import Any
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable, Protocol
 
 from app.core.config import load_settings
 from app.core.market_store import (
@@ -22,15 +24,6 @@ from app.core.market_store import (
 
 logger = logging.getLogger(__name__)
 
-
-DEFAULT_SYMBOL_FIXTURES = [
-    {"symbol": "000001.SZ", "name": "平安银行", "exchange": "SZ", "industry": "银行", "area": "深圳", "listing_date": "1991-04-03"},
-    {"symbol": "600519.SH", "name": "贵州茅台", "exchange": "SH", "industry": "白酒", "area": "贵州", "listing_date": "2001-08-27"},
-    {"symbol": "300750.SZ", "name": "宁德时代", "exchange": "SZ", "industry": "电池", "area": "福建", "listing_date": "2018-06-11"},
-    {"symbol": "601318.SH", "name": "中国平安", "exchange": "SH", "industry": "保险", "area": "上海", "listing_date": "2007-03-01"},
-    {"symbol": "002415.SZ", "name": "海康威视", "exchange": "SZ", "industry": "安防", "area": "杭州", "listing_date": "2010-05-28"},
-]
-
 SOURCE_MODULES = {
     "akshare": "akshare",
     "tushare": "tushare",
@@ -43,8 +36,75 @@ SOURCE_TOKEN_FIELDS = {
     "baostock": None,
 }
 
-# 标记哪些数据源已实现真实适配器
 LIVE_SYNC_IMPLEMENTED: set[str] = {"akshare", "tushare", "baostock"}
+MARKET_WIDE_NEWS_SYMBOL = "__MARKET__"
+DEFAULT_SYMBOL_CANDIDATES = ["000001.SZ", "600519.SH", "300750.SZ"]
+DEFAULT_INDEX_CODES = ["000300.SH", "000001.SH"]
+
+# Sync mode presets: (history_days, financial_periods, news_count)
+SYNC_MODE_PRESETS: dict[str, dict[str, int]] = {
+    "incremental": {"history_days": 30, "financial_periods": 4, "news_count": 20},
+    "standard": {"history_days": 365, "financial_periods": 12, "news_count": 50},
+    "full": {"history_days": 3650, "financial_periods": 20, "news_count": 100},
+}
+
+DEFAULT_MAX_WORKERS = 3
+DEFAULT_MAX_RETRIES = 3
+RETRY_BACKOFF_SECONDS = [2, 4, 8]
+
+# ---------------------------------------------------------------------------
+# Cancel / pause registry — keyed by job_id
+# ---------------------------------------------------------------------------
+_cancel_events: dict[str, threading.Event] = {}
+_pause_events: dict[str, threading.Event] = {}  # cleared = paused, set = running
+
+
+def register_job_signals(job_id: str) -> tuple[threading.Event, threading.Event]:
+    """Register cancel and pause events for a job. Returns (cancel_event, pause_event)."""
+    cancel_ev = threading.Event()
+    pause_ev = threading.Event()
+    pause_ev.set()  # not paused by default
+    _cancel_events[job_id] = cancel_ev
+    _pause_events[job_id] = pause_ev
+    return cancel_ev, pause_ev
+
+
+def unregister_job_signals(job_id: str) -> None:
+    _cancel_events.pop(job_id, None)
+    _pause_events.pop(job_id, None)
+
+
+def request_cancel(job_id: str) -> bool:
+    ev = _cancel_events.get(job_id)
+    if ev is None:
+        return False
+    ev.set()
+    # Also unpause so the thread can exit
+    pause_ev = _pause_events.get(job_id)
+    if pause_ev:
+        pause_ev.set()
+    return True
+
+
+def request_pause(job_id: str) -> bool:
+    ev = _pause_events.get(job_id)
+    if ev is None:
+        return False
+    ev.clear()  # clear = paused
+    return True
+
+
+def request_resume(job_id: str) -> bool:
+    ev = _pause_events.get(job_id)
+    if ev is None:
+        return False
+    ev.set()  # set = running
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Data classes
+# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -62,20 +122,29 @@ class SyncExecutionResult:
     warnings: list[str] = field(default_factory=list)
 
 
+class ProgressCallback(Protocol):
+    def __call__(
+        self,
+        *,
+        total_items: int | None = None,
+        completed_items: int | None = None,
+        error_items: int | None = None,
+        skipped_items: int | None = None,
+        current_item: str | None = None,
+    ) -> None: ...
+
+
+def _noop_progress(**_: Any) -> None:
+    pass
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
-
-
-def _stable_int(seed: str, minimum: int, maximum: int) -> int:
-    digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
-    value = int(digest[:10], 16)
-    return minimum + (value % (maximum - minimum + 1))
-
-
-def _stable_float(seed: str, minimum: float, maximum: float, digits: int = 2) -> float:
-    scale = 10**digits
-    raw = _stable_int(seed, int(minimum * scale), int(maximum * scale))
-    return round(raw / scale, digits)
 
 
 def normalize_symbol(symbol: str) -> str:
@@ -97,46 +166,22 @@ def describe_source_status(source_name: str, config: dict[str, Any]) -> SourceRu
     live_mode = runtime_ready and source_name in LIVE_SYNC_IMPLEMENTED
 
     if not enabled:
-        return SourceRuntimeStatus(
-            configured=False,
-            status="disabled",
-            note="当前数据源已禁用，不会作为实时同步主源。",
-            live_mode=False,
-        )
-
+        return SourceRuntimeStatus(False, "disabled", "当前数据源已禁用，不会执行实时同步。", False)
     if live_mode:
-        return SourceRuntimeStatus(
-            configured=True,
-            status="online",
-            note="依赖和配置已就绪，可执行真实同步。",
-            live_mode=True,
-        )
-
+        return SourceRuntimeStatus(True, "online", "依赖和配置已就绪，可执行实时同步。", True)
     if runtime_ready:
-        return SourceRuntimeStatus(
-            configured=True,
-            status="adapter_pending",
-            note="运行环境已就绪，但真实抓取适配尚未接入；当前同步仍回退到内置示例数据。",
-            live_mode=False,
-        )
-
+        return SourceRuntimeStatus(True, "adapter_pending", "运行环境已就绪，但当前数据源尚未接入实时同步实现。", False)
     if not dependency_ready:
-        return SourceRuntimeStatus(
-            configured=False,
-            status="dependency_missing",
-            note="未安装对应 SDK；当前同步会回退到内置示例数据。",
-            live_mode=False,
-        )
-
-    return SourceRuntimeStatus(
-        configured=False,
-        status="missing_token",
-        note="缺少访问凭证；当前同步会回退到内置示例数据。",
-        live_mode=False,
-    )
+        return SourceRuntimeStatus(False, "dependency_missing", "缺少对应 SDK，当前无法执行实时同步。", False)
+    return SourceRuntimeStatus(False, "missing_token", "缺少访问凭证，当前无法执行实时同步。", False)
 
 
-def _resolve_symbols(job: dict[str, Any], limit: int = 3) -> list[str]:
+def _resolve_symbols(job: dict[str, Any], *, allow_all: bool = False) -> list[str]:
+    """Resolve the list of symbols to sync from job params/scope.
+
+    When *allow_all* is True (full-sync mode) and scope == 'all',
+    we return ALL symbols from the symbol_master table instead of a small sample.
+    """
     params = job.get("params", {})
     raw_symbols = params.get("symbols")
     if isinstance(raw_symbols, list) and raw_symbols:
@@ -150,153 +195,198 @@ def _resolve_symbols(job: dict[str, Any], limit: int = 3) -> list[str]:
     if scope and scope.lower() != "all":
         return [normalize_symbol(item) for item in scope.split(",") if item.strip()]
 
-    stored_symbols = list_seed_symbols(limit=limit)
-    if stored_symbols:
-        return stored_symbols
+    # scope == 'all'
+    if allow_all:
+        stored = list_seed_symbols(limit=100000)  # effectively all
+        if stored:
+            return stored
+    else:
+        stored = list_seed_symbols(limit=3)
+        if stored:
+            return stored
 
-    return [item["symbol"] for item in DEFAULT_SYMBOL_FIXTURES[:limit]]
-
-
-def _business_days(count: int) -> list[date]:
-    cursor = _utc_now().date()
-    days: list[date] = []
-    while len(days) < count:
-        if cursor.weekday() < 5:
-            days.append(cursor)
-        cursor -= timedelta(days=1)
-    return list(reversed(days))
-
-
-def _quarter_end_dates(count: int) -> list[date]:
-    today = _utc_now().date()
-    quarter_month = ((today.month - 1) // 3 + 1) * 3
-    cursor = date(today.year, quarter_month, 1)
-    dates: list[date] = []
-    while len(dates) < count:
-        next_month = date(cursor.year + (1 if cursor.month == 12 else 0), 1 if cursor.month == 12 else cursor.month + 1, 1)
-        dates.append(next_month - timedelta(days=1))
-        prev_month = cursor.month - 3
-        prev_year = cursor.year
-        while prev_month <= 0:
-            prev_month += 12
-            prev_year -= 1
-        cursor = date(prev_year, prev_month, 1)
-    return dates
-
-
-def _build_symbol_rows(source: str) -> list[dict[str, Any]]:
-    updated_at = _utc_now()
-    return [
-        {
-            "symbol": item["symbol"],
-            "exchange": item["exchange"],
-            "name": item["name"],
-            "industry": item["industry"],
-            "area": item["area"],
-            "listing_date": item["listing_date"],
-            "status": "listed",
-            "source": source,
-            "updated_at": updated_at,
-        }
-        for item in DEFAULT_SYMBOL_FIXTURES
-    ]
-
-
-def _build_quote_rows(symbol: str, source: str, count: int = 60) -> list[dict[str, Any]]:
-    base_price = _stable_float(f"{symbol}:{source}:base", 12, 380)
-    rows: list[dict[str, Any]] = []
-    updated_at = _utc_now()
-
-    for index, trade_date in enumerate(_business_days(count)):
-        drift = _stable_float(f"{symbol}:{source}:drift:{index}", -4.5, 4.5)
-        open_price = round(base_price + drift, 2)
-        close_price = round(open_price + _stable_float(f"{symbol}:{source}:close:{index}", -2.2, 2.2), 2)
-        high_price = round(max(open_price, close_price) + _stable_float(f"{symbol}:{source}:high:{index}", 0.2, 2.8), 2)
-        low_price = round(min(open_price, close_price) - _stable_float(f"{symbol}:{source}:low:{index}", 0.2, 2.4), 2)
-        volume = float(_stable_int(f"{symbol}:{source}:volume:{index}", 1_500_000, 25_000_000))
-
-        rows.append(
-            {
-                "symbol": symbol,
-                "trade_date": trade_date,
-                "open": max(open_price, 0.01),
-                "high": max(high_price, 0.01),
-                "low": max(low_price, 0.01),
-                "close": max(close_price, 0.01),
-                "volume": volume,
-                "amount": round(volume * max(close_price, 0.01), 2),
-                "source": source,
-                "updated_at": updated_at,
-            }
-        )
-
-    return rows
-
-
-def _build_financial_rows(symbol: str, source: str, count: int = 6) -> list[dict[str, Any]]:
-    updated_at = _utc_now()
-    rows: list[dict[str, Any]] = []
-
-    for index, report_date in enumerate(_quarter_end_dates(count)):
-        rows.append(
-            {
-                "symbol": symbol,
-                "report_date": report_date,
-                "report_type": "quarterly",
-                "revenue": _stable_float(f"{symbol}:{source}:revenue:{index}", 18, 420) * 100000000.0,
-                "net_profit": _stable_float(f"{symbol}:{source}:profit:{index}", 2, 88) * 100000000.0,
-                "roe": _stable_float(f"{symbol}:{source}:roe:{index}", 4.5, 28.0),
-                "gross_margin": _stable_float(f"{symbol}:{source}:margin:{index}", 12.0, 67.0),
-                "source": source,
-                "updated_at": updated_at,
-            }
-        )
-
-    return rows
-
-
-def _build_news_rows(symbol: str, source: str, count: int = 8) -> list[dict[str, Any]]:
-    updated_at = _utc_now()
-    rows: list[dict[str, Any]] = []
-
-    for index in range(count):
-        published_at = updated_at - timedelta(hours=index * 6)
-        rows.append(
-            {
-                "news_id": f"{source}:{symbol}:{published_at:%Y%m%d%H%M}:{index}",
-                "symbol": symbol,
-                "published_at": published_at,
-                "title": f"{symbol} 经营进展跟踪 #{index + 1}",
-                "content": f"{symbol} 最近披露的经营进展、行业动态与市场反馈已纳入本地新闻样本，用于后续分析链路验证。",
-                "url": f"https://example.local/{source}/{symbol}/{index + 1}",
-                "source": source,
-                "updated_at": updated_at,
-            }
-        )
-
-    return rows
+    return DEFAULT_SYMBOL_CANDIDATES[:]
 
 
 def _create_adapter(source_name: str, source_config: dict[str, Any]):
-    """根据数据源名称创建对应的适配器实例。"""
-    from app.services.adapters.base import DataSourceAdapter
-
     if source_name == "akshare":
         from app.services.adapters.akshare_adapter import AKShareAdapter
+
         return AKShareAdapter()
-    elif source_name == "tushare":
+    if source_name == "tushare":
         from app.services.adapters.tushare_adapter import TushareAdapter
+
         return TushareAdapter(token=source_config.get("token", ""))
-    elif source_name == "baostock":
+    if source_name == "baostock":
         from app.services.adapters.baostock_adapter import BaoStockAdapter
+
         return BaoStockAdapter()
     return None
 
 
+def _dedupe_messages(messages: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for message in messages:
+        text = str(message).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
+def _format_details(messages: list[str], fallback: str) -> str:
+    unique = _dedupe_messages(messages)
+    return "；".join(unique[:3]) if unique else fallback
+
+
+def _fail_sync(summary: str, warnings: list[str] | None = None) -> SyncExecutionResult:
+    return SyncExecutionResult(status="failed", summary=summary, warnings=_dedupe_messages(warnings or []))
+
+
+def _cancel_sync(summary: str, warnings: list[str] | None = None) -> SyncExecutionResult:
+    return SyncExecutionResult(status="cancelled", summary=summary, warnings=_dedupe_messages(warnings or []))
+
+
+def _complete_sync(summary: str, warnings: list[str] | None = None) -> SyncExecutionResult:
+    normalized = _dedupe_messages(warnings or [])
+    return SyncExecutionResult(
+        status="completed_with_warnings" if normalized else "completed",
+        summary=summary,
+        warnings=normalized,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Retry wrapper
+# ---------------------------------------------------------------------------
+
+
+def _retry_fetch(
+    fn: Callable[..., Any],
+    args: tuple = (),
+    kwargs: dict[str, Any] | None = None,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    label: str = "",
+) -> Any:
+    """Call *fn* with automatic retry on failure (exponential backoff)."""
+    kwargs = kwargs or {}
+    last_exc: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:
+            last_exc = exc
+            if attempt < max_retries - 1:
+                wait = RETRY_BACKOFF_SECONDS[min(attempt, len(RETRY_BACKOFF_SECONDS) - 1)]
+                logger.warning(
+                    "[%s] 第 %d/%d 次重试失败: %s — %ds 后重试",
+                    label, attempt + 1, max_retries, exc, wait,
+                )
+                time.sleep(wait)
+    raise last_exc  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# Dirty data filters
+# ---------------------------------------------------------------------------
+
+
+def _is_valid_number(value: Any) -> bool:
+    """Check that value is a finite number and not None / NaN."""
+    if value is None:
+        return False
+    try:
+        f = float(value)
+        return f == f  # NaN check
+    except (TypeError, ValueError):
+        return False
+
+
+def _filter_daily_quotes(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    """Filter out dirty quote rows. Returns (clean_rows, filtered_count)."""
+    clean: list[dict[str, Any]] = []
+    for row in rows:
+        trade_date = row.get("trade_date")
+        if not trade_date:
+            continue
+        # All OHLCV must be valid positive numbers
+        if not all(_is_valid_number(row.get(f)) for f in ("open", "high", "low", "close")):
+            continue
+        if any(float(row.get(f, 0)) <= 0 for f in ("open", "high", "low", "close")):
+            continue
+        if not _is_valid_number(row.get("volume")) or float(row.get("volume", -1)) < 0:
+            continue
+        clean.append(row)
+    return clean, len(rows) - len(clean)
+
+
+def _filter_financial_reports(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    clean: list[dict[str, Any]] = []
+    for row in rows:
+        if not row.get("report_date"):
+            continue
+        # At least one of revenue/net_profit should be a valid number
+        if not _is_valid_number(row.get("revenue")) and not _is_valid_number(row.get("net_profit")):
+            continue
+        clean.append(row)
+    return clean, len(rows) - len(clean)
+
+
+def _filter_news_items(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    clean: list[dict[str, Any]] = []
+    for row in rows:
+        if not row.get("news_id"):
+            continue
+        title = row.get("title")
+        if not title or not str(title).strip():
+            continue
+        clean.append(row)
+    return clean, len(rows) - len(clean)
+
+
+def _filter_announcements(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    clean: list[dict[str, Any]] = []
+    for row in rows:
+        if not row.get("announcement_id"):
+            continue
+        title = row.get("title")
+        if not title or not str(title).strip():
+            continue
+        clean.append(row)
+    return clean, len(rows) - len(clean)
+
+
+# ---------------------------------------------------------------------------
+# Check cancel / pause
+# ---------------------------------------------------------------------------
+
+
+def _check_cancel_pause(
+    cancel_event: threading.Event | None,
+    pause_event: threading.Event | None,
+) -> bool:
+    """Return True if job should be cancelled."""
+    if cancel_event and cancel_event.is_set():
+        return True
+    if pause_event:
+        # Block until resumed or cancelled
+        while not pause_event.is_set():
+            if cancel_event and cancel_event.is_set():
+                return True
+            pause_event.wait(timeout=1.0)
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Live sync functions (with retry + filter + cancel/pause + progress)
+# ---------------------------------------------------------------------------
+
+
 def _live_symbol_sync(adapter, source_name: str) -> tuple[int, int]:
-    """使用真实适配器同步股票列表。"""
     updated_at = _utc_now()
-    raw_rows = adapter.fetch_symbol_list()
+    raw_rows = _retry_fetch(adapter.fetch_symbol_list, label=f"{source_name}/symbols")
     if not raw_rows:
         return 0, 0
 
@@ -324,120 +414,204 @@ def _live_symbol_sync(adapter, source_name: str) -> tuple[int, int]:
         }
         for row in raw_rows
     ]
-    symbol_count = upsert_symbol_master(symbol_rows)
-    profile_count = upsert_company_profiles(profile_rows)
-    return symbol_count, profile_count
+    return upsert_symbol_master(symbol_rows), upsert_company_profiles(profile_rows)
 
 
-def _live_history_sync(adapter, symbols: list[str], source_name: str, days: int = 60) -> int:
-    """使用真实适配器同步历史行情。"""
-    updated_at = _utc_now()
-    end_date = _utc_now().date()
-    start_date = end_date - timedelta(days=int(days * 1.5))  # 多拉一些日历日覆盖交易日
+def _sync_single_history(
+    adapter,
+    symbol: str,
+    source_name: str,
+    start_date,
+    end_date,
+    updated_at: datetime,
+) -> tuple[int, int, str | None]:
+    """Sync one symbol's daily quotes. Returns (written, filtered, error_msg)."""
+    try:
+        rows = _retry_fetch(
+            adapter.fetch_daily_quotes,
+            args=(symbol, start_date, end_date),
+            label=f"{source_name}/{symbol}/quotes",
+        )
+    except Exception as exc:
+        return 0, 0, f"{symbol} 日线抓取失败: {exc}"
 
-    all_rows: list[dict[str, Any]] = []
-    for symbol in symbols:
-        try:
-            rows = adapter.fetch_daily_quotes(symbol, start_date, end_date)
-            for row in rows:
-                row["source"] = source_name
-                row["updated_at"] = updated_at
-            all_rows.extend(rows)
-        except Exception as exc:
-            logger.warning("同步 %s 历史行情失败: %s", symbol, exc)
-    return upsert_daily_quotes(all_rows)
-
-
-def _live_financial_sync(adapter, symbols: list[str], source_name: str, periods: int = 6) -> int:
-    """使用真实适配器同步财务数据。"""
-    updated_at = _utc_now()
-    all_rows: list[dict[str, Any]] = []
-    for symbol in symbols:
-        try:
-            rows = adapter.fetch_financials(symbol, periods)
-            for row in rows:
-                row["source"] = source_name
-                row["updated_at"] = updated_at
-            all_rows.extend(rows)
-        except Exception as exc:
-            logger.warning("同步 %s 财务数据失败: %s", symbol, exc)
-    return upsert_financial_reports(all_rows)
+    for row in rows:
+        row["source"] = source_name
+        row["updated_at"] = updated_at
+    clean, filtered = _filter_daily_quotes(rows)
+    written = upsert_daily_quotes(clean)
+    return written, filtered, None
 
 
-# 全市场新闻使用此标记符号存储，get_news 查询时会自动包含
-MARKET_WIDE_NEWS_SYMBOL = "__MARKET__"
+def _sync_single_financial(
+    adapter,
+    symbol: str,
+    source_name: str,
+    periods: int,
+    updated_at: datetime,
+) -> tuple[int, int, str | None]:
+    try:
+        rows = _retry_fetch(
+            adapter.fetch_financials,
+            args=(symbol, periods),
+            label=f"{source_name}/{symbol}/financials",
+        )
+    except Exception as exc:
+        return 0, 0, f"{symbol} 财务数据抓取失败: {exc}"
+
+    for row in rows:
+        row["source"] = source_name
+        row["updated_at"] = updated_at
+    clean, filtered = _filter_financial_reports(rows)
+    written = upsert_financial_reports(clean)
+    return written, filtered, None
 
 
-def _live_news_sync(adapter, symbols: list[str], source_name: str, count: int = 20) -> int:
-    """使用真实适配器同步新闻。"""
-    updated_at = _utc_now()
-    all_rows: list[dict[str, Any]] = []
+def _sync_single_news(
+    adapter,
+    symbol: str,
+    source_name: str,
+    count: int,
+    updated_at: datetime,
+) -> tuple[int, int, str | None]:
+    try:
+        rows = _retry_fetch(
+            adapter.fetch_news,
+            args=(symbol, count),
+            label=f"{source_name}/{symbol}/news",
+        )
+    except Exception as exc:
+        return 0, 0, f"{symbol} 新闻抓取失败: {exc}"
 
-    if not adapter.news_is_symbol_specific:
-        # 此数据源返回全市场新闻，获取一次并标记为市场级新闻。
-        try:
-            rows = adapter.fetch_news(MARKET_WIDE_NEWS_SYMBOL, count)
-            for row in rows:
-                row["symbol"] = MARKET_WIDE_NEWS_SYMBOL
-                row["source"] = source_name
-                row["updated_at"] = updated_at
-            all_rows.extend(rows)
-        except Exception as exc:
-            logger.warning("同步全市场新闻失败: %s", exc)
-        return upsert_news_items(all_rows)
-
-    for symbol in symbols:
-        try:
-            rows = adapter.fetch_news(symbol, count)
-            for row in rows:
-                row["source"] = source_name
-                row["updated_at"] = updated_at
-            all_rows.extend(rows)
-        except Exception as exc:
-            logger.warning("同步 %s 新闻失败: %s", symbol, exc)
-    return upsert_news_items(all_rows)
+    for row in rows:
+        row["source"] = source_name
+        row["updated_at"] = updated_at
+    clean, filtered = _filter_news_items(rows)
+    written = upsert_news_items(clean)
+    return written, filtered, None
 
 
-# 分析引擎需要的大盘指数代码
-_DEFAULT_INDEX_CODES = ["000300.SH", "000001.SH"]
+def _sync_single_announcement(
+    adapter,
+    symbol: str,
+    source_name: str,
+    count: int,
+    updated_at: datetime,
+) -> tuple[int, int, str | None]:
+    try:
+        rows = _retry_fetch(
+            adapter.fetch_announcements,
+            args=(symbol, count),
+            label=f"{source_name}/{symbol}/announcements",
+        )
+    except Exception as exc:
+        return 0, 0, f"{symbol} 公告抓取失败: {exc}"
+
+    for row in rows:
+        row["source"] = source_name
+        row["updated_at"] = updated_at
+    clean, filtered = _filter_announcements(rows)
+    written = upsert_announcements(clean)
+    return written, filtered, None
 
 
-def _live_index_sync(adapter, source_name: str, days: int = 60) -> int:
-    """使用真实适配器同步大盘指数日线行情。"""
-    updated_at = _utc_now()
-    end_date = _utc_now().date()
-    start_date = end_date - timedelta(days=int(days * 1.5))
+def _run_per_symbol(
+    fn: Callable,
+    symbols: list[str],
+    *,
+    max_workers: int = DEFAULT_MAX_WORKERS,
+    cancel_event: threading.Event | None = None,
+    pause_event: threading.Event | None = None,
+    progress: ProgressCallback = _noop_progress,
+    label: str = "",
+) -> tuple[int, int, int, int, list[str]]:
+    """Execute *fn(symbol)* for each symbol with concurrency, cancel, pause, progress.
 
-    all_rows: list[dict[str, Any]] = []
-    for index_code in _DEFAULT_INDEX_CODES:
-        try:
-            rows = adapter.fetch_index_daily(index_code, start_date, end_date)
-            for row in rows:
-                row["source"] = source_name
-                row["updated_at"] = updated_at
-            all_rows.extend(rows)
-        except Exception as exc:
-            logger.warning("同步指数 %s 日线失败: %s", index_code, exc)
-    return upsert_index_daily(all_rows)
+    *fn* must accept a single positional arg (symbol) and return
+    ``(written: int, filtered: int, error_msg: str | None)``.
+
+    Returns ``(total_written, total_filtered, ok_count, error_count, errors)``.
+    """
+    total_written = 0
+    total_filtered = 0
+    ok_count = 0
+    error_count = 0
+    errors: list[str] = []
+    completed = 0
+
+    progress(total_items=len(symbols), completed_items=0)
+
+    effective_workers = min(max_workers, len(symbols))
+    if effective_workers <= 1:
+        # Sequential path — simpler and also avoids ThreadPoolExecutor overhead for 1 worker
+        for symbol in symbols:
+            if _check_cancel_pause(cancel_event, pause_event):
+                errors.append("用户取消了同步任务。")
+                break
+            progress(current_item=symbol)
+            written, filtered, err = fn(symbol)
+            total_written += written
+            total_filtered += filtered
+            if err:
+                error_count += 1
+                errors.append(err)
+            else:
+                ok_count += 1
+            completed += 1
+            progress(completed_items=completed, error_items=error_count)
+        return total_written, total_filtered, ok_count, error_count, errors
+
+    # Concurrent path
+    with ThreadPoolExecutor(max_workers=effective_workers) as pool:
+        future_to_symbol: dict[Any, str] = {}
+        for symbol in symbols:
+            if _check_cancel_pause(cancel_event, pause_event):
+                errors.append("用户取消了同步任务。")
+                break
+            future = pool.submit(fn, symbol)
+            future_to_symbol[future] = symbol
+
+        for future in as_completed(future_to_symbol):
+            if _check_cancel_pause(cancel_event, pause_event):
+                # Cancel remaining futures
+                for f in future_to_symbol:
+                    f.cancel()
+                errors.append("用户取消了同步任务。")
+                break
+
+            symbol = future_to_symbol[future]
+            progress(current_item=symbol)
+            try:
+                written, filtered, err = future.result()
+                total_written += written
+                total_filtered += filtered
+                if err:
+                    error_count += 1
+                    errors.append(err)
+                else:
+                    ok_count += 1
+            except Exception as exc:
+                error_count += 1
+                errors.append(f"{symbol} 处理异常: {exc}")
+
+            completed += 1
+            progress(completed_items=completed, error_items=error_count)
+
+    return total_written, total_filtered, ok_count, error_count, errors
 
 
-def _live_announcement_sync(adapter, symbols: list[str], source_name: str, count: int = 20) -> int:
-    """使用真实适配器同步个股公告。"""
-    updated_at = _utc_now()
-    all_rows: list[dict[str, Any]] = []
-    for symbol in symbols:
-        try:
-            rows = adapter.fetch_announcements(symbol, count)
-            for row in rows:
-                row["source"] = source_name
-                row["updated_at"] = updated_at
-            all_rows.extend(rows)
-        except Exception as exc:
-            logger.warning("同步 %s 公告失败: %s", symbol, exc)
-    return upsert_announcements(all_rows)
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
 
 
-def execute_sync_job(job: dict[str, Any]) -> SyncExecutionResult:
+def execute_sync_job(
+    job: dict[str, Any],
+    *,
+    cancel_event: threading.Event | None = None,
+    pause_event: threading.Event | None = None,
+    progress: ProgressCallback = _noop_progress,
+) -> SyncExecutionResult:
     settings = load_settings()
     source_name = job["source"]
     source_config = settings["data_sources"].get(source_name)
@@ -445,117 +619,264 @@ def execute_sync_job(job: dict[str, Any]) -> SyncExecutionResult:
         raise ValueError(f"未知数据源：{source_name}")
 
     runtime_status = describe_source_status(source_name, source_config)
-    warnings: list[str] = []
     use_live = runtime_status.live_mode
 
-    if not use_live:
-        warnings.append(runtime_status.note)
+    params = job.get("params", {})
+    sync_mode = str(params.get("sync_mode", "standard"))
+    if sync_mode not in SYNC_MODE_PRESETS:
+        sync_mode = "standard"
+    preset = SYNC_MODE_PRESETS[sync_mode]
+    max_workers = int(params.get("max_workers", DEFAULT_MAX_WORKERS))
+    allow_all = sync_mode == "full"
 
-    # --- 健康检查 ---
+    # ---- health_check ----
     if job["job_type"] == "health_check":
         if use_live:
             adapter = _create_adapter(source_name, source_config)
-            if adapter:
-                ok, msg = adapter.test_connection()
-                summary = f"{source_name} 连接测试{'成功' if ok else '失败'}：{msg}"
+            if adapter is None:
                 return SyncExecutionResult(
-                    status="completed" if ok else "completed_with_warnings",
-                    summary=summary,
-                    warnings=[] if ok else [msg],
+                    status="completed_with_warnings",
+                    summary=f"{source_name} 连接测试未执行：未找到可用适配器。",
+                    warnings=["未找到可用适配器。"],
                 )
-        summary = f"{source_name} 状态：{runtime_status.status}。{runtime_status.note}"
-        return SyncExecutionResult(
-            status="completed_with_warnings" if warnings else "completed",
-            summary=summary,
-            warnings=warnings,
-        )
+
+            ok, msg = adapter.test_connection()
+            return SyncExecutionResult(
+                status="completed" if ok else "completed_with_warnings",
+                summary=f"{source_name} 连接测试{'成功' if ok else '失败'}：{msg}",
+                warnings=[] if ok else [msg],
+            )
+
+        summary = f"{source_name} 当前不可执行实时同步：{runtime_status.note}"
+        return SyncExecutionResult(status="completed_with_warnings", summary=summary, warnings=[runtime_status.note])
 
     if not init_market_store():
         raise RuntimeError("DuckDB 依赖不可用，无法初始化本地数据仓。")
 
-    adapter = _create_adapter(source_name, source_config) if use_live else None
+    if not use_live:
+        summary = f"{source_name} 实时同步失败：{runtime_status.note}"
+        return _fail_sync(summary, [runtime_status.note])
 
-    # --- 股票基本信息同步 ---
+    adapter = _create_adapter(source_name, source_config)
+    if adapter is None:
+        return _fail_sync(f"{source_name} 实时同步失败：未找到可用适配器。", ["未找到可用适配器。"])
+
+    # ---- symbol_sync ----
     if job["job_type"] == "symbol_sync":
-        if adapter and use_live:
-            try:
-                symbol_count, profile_count = _live_symbol_sync(adapter, source_name)
-                summary = f"{source_name} 已从真实接口写入 {symbol_count} 条股票基础信息，更新 {profile_count} 条公司档案。"
-                return SyncExecutionResult(status="completed", summary=summary, warnings=[])
-            except Exception as exc:
-                logger.warning("真实同步失败，回退到 fixture: %s", exc)
-                warnings.append(f"真实同步失败（{exc}），已回退到内置示例数据。")
+        if _check_cancel_pause(cancel_event, pause_event):
+            return _cancel_sync(f"{source_name} 股票基础信息同步被用户取消。")
 
-        symbol_rows = _build_symbol_rows(source_name)
-        symbol_count = upsert_symbol_master(symbol_rows)
-        profile_count = upsert_company_profiles(symbol_rows)
+        progress(total_items=1, current_item="股票列表")
+        symbol_count, profile_count = _live_symbol_sync(adapter, source_name)
+        progress(completed_items=1)
+        if cancel_event and cancel_event.is_set():
+            return _cancel_sync(
+                f"{source_name} 股票基础信息同步被用户取消。写入 {symbol_count} 条记录。",
+                ["用户取消了同步任务。"],
+            )
+        if symbol_count <= 0:
+            return _fail_sync(f"{source_name} 股票基础信息同步失败：未写入任何记录。")
+
+        warnings: list[str] = []
         summary = f"{source_name} 已写入 {symbol_count} 条股票基础信息，更新 {profile_count} 条公司档案。"
+        if profile_count <= 0:
+            warnings.append("公司档案未写入任何记录。")
+        return _complete_sync(summary, warnings)
 
-    # --- 历史行情同步 ---
-    elif job["job_type"] == "history_sync":
-        symbols = _resolve_symbols(job)
-        if adapter and use_live:
+    # ---- history_sync ----
+    if job["job_type"] == "history_sync":
+        symbols = _resolve_symbols(job, allow_all=allow_all)
+        days = preset["history_days"]
+        updated_at = _utc_now()
+        end_date = _utc_now().date()
+        start_date = end_date - timedelta(days=int(days * 1.5))
+
+        def _do_history(sym: str) -> tuple[int, int, str | None]:
+            return _sync_single_history(adapter, sym, source_name, start_date, end_date, updated_at)
+
+        written, filtered, ok, errs, errors = _run_per_symbol(
+            _do_history, symbols,
+            max_workers=max_workers,
+            cancel_event=cancel_event, pause_event=pause_event,
+            progress=progress, label="history",
+        )
+
+        if cancel_event and cancel_event.is_set():
+            return _cancel_sync(f"{source_name} 历史行情同步被用户取消。写入 {written} 条记录。", errors)
+
+        # Also sync index data
+        index_count, index_errors = _live_index_sync(adapter, source_name, days)
+        all_warnings = list(errors)
+        if index_count <= 0:
+            all_warnings.append("指数日线缺失。")
+        all_warnings.extend(index_errors)
+        if filtered > 0:
+            all_warnings.append(f"过滤了 {filtered} 条脏数据。")
+
+        if written <= 0:
+            detail = _format_details(errors, "未获取到任何个股日线数据。")
+            return _fail_sync(f"{source_name} 历史行情同步失败：{detail}", all_warnings)
+
+        summary = (
+            f"{source_name} 已同步 {ok}/{len(symbols)} 只股票的历史行情（{sync_mode}模式，{days}天），"
+            f"写入 {written} 条个股日线记录"
+        )
+        if errs > 0:
+            summary += f"，{errs} 只失败"
+        if filtered > 0:
+            summary += f"，过滤 {filtered} 条脏数据"
+        if index_count > 0:
+            summary += f"，并写入 {index_count} 条指数日线记录。"
+        else:
+            summary += "。"
+        return _complete_sync(summary, all_warnings)
+
+    # ---- financial_sync ----
+    if job["job_type"] == "financial_sync":
+        symbols = _resolve_symbols(job, allow_all=allow_all)
+        periods = preset["financial_periods"]
+        updated_at = _utc_now()
+
+        def _do_financial(sym: str) -> tuple[int, int, str | None]:
+            return _sync_single_financial(adapter, sym, source_name, periods, updated_at)
+
+        written, filtered, ok, errs, errors = _run_per_symbol(
+            _do_financial, symbols,
+            max_workers=max_workers,
+            cancel_event=cancel_event, pause_event=pause_event,
+            progress=progress, label="financial",
+        )
+
+        if cancel_event and cancel_event.is_set():
+            return _cancel_sync(f"{source_name} 财务数据同步被用户取消。写入 {written} 条记录。", errors)
+
+        all_warnings = list(errors)
+        if filtered > 0:
+            all_warnings.append(f"过滤了 {filtered} 条脏数据。")
+
+        if written <= 0:
+            detail = _format_details(errors, "未获取到任何财务数据。")
+            return _fail_sync(f"{source_name} 财务数据同步失败：{detail}", all_warnings)
+
+        summary = (
+            f"{source_name} 已同步 {ok}/{len(symbols)} 只股票的财务数据（{sync_mode}模式，{periods}期），"
+            f"写入 {written} 条财报记录"
+        )
+        if errs > 0:
+            summary += f"，{errs} 只失败"
+        if filtered > 0:
+            summary += f"，过滤 {filtered} 条脏数据"
+        summary += "。"
+        return _complete_sync(summary, all_warnings)
+
+    # ---- news_sync ----
+    if job["job_type"] == "news_sync":
+        symbols = _resolve_symbols(job, allow_all=allow_all)
+        news_count_limit = preset["news_count"]
+        updated_at = _utc_now()
+
+        # Market-wide news (non-symbol-specific)
+        market_news_written = 0
+        market_news_errors: list[str] = []
+        if not adapter.news_is_symbol_specific:
             try:
-                quote_count = _live_history_sync(adapter, symbols, source_name)
-                # 同时同步大盘指数日线，分析引擎 index_analyst 需要
-                index_count = _live_index_sync(adapter, source_name)
-                summary = (
-                    f"{source_name} 已从真实接口同步 {len(symbols)} 只股票的历史行情，"
-                    f"共写入 {quote_count} 条日线记录，{index_count} 条指数日线。"
+                m_rows = _retry_fetch(
+                    adapter.fetch_news,
+                    args=(MARKET_WIDE_NEWS_SYMBOL, news_count_limit),
+                    label=f"{source_name}/market-news",
                 )
-                return SyncExecutionResult(status="completed", summary=summary, warnings=[])
+                for row in m_rows:
+                    row["symbol"] = MARKET_WIDE_NEWS_SYMBOL
+                    row["source"] = source_name
+                    row["updated_at"] = updated_at
+                clean, _ = _filter_news_items(m_rows)
+                market_news_written = upsert_news_items(clean)
             except Exception as exc:
-                logger.warning("真实同步失败，回退到 fixture: %s", exc)
-                warnings.append(f"真实同步失败（{exc}），已回退到内置示例数据。")
+                market_news_errors.append(f"全市场新闻抓取失败: {exc}")
 
-        quote_rows = [row for symbol in symbols for row in _build_quote_rows(symbol, source_name)]
-        quote_count = upsert_daily_quotes(quote_rows)
-        summary = f"{source_name} 已同步 {len(symbols)} 只股票的历史行情，共写入 {quote_count} 条日线记录。"
+        # Per-symbol news
+        def _do_news(sym: str) -> tuple[int, int, str | None]:
+            if adapter.news_is_symbol_specific:
+                return _sync_single_news(adapter, sym, source_name, news_count_limit, updated_at)
+            return 0, 0, None  # already handled above
 
-    # --- 财务数据同步 ---
-    elif job["job_type"] == "financial_sync":
-        symbols = _resolve_symbols(job)
-        if adapter and use_live:
-            try:
-                report_count = _live_financial_sync(adapter, symbols, source_name)
-                summary = f"{source_name} 已从真实接口同步 {len(symbols)} 只股票的财务摘要，共写入 {report_count} 条财报记录。"
-                return SyncExecutionResult(status="completed", summary=summary, warnings=[])
-            except Exception as exc:
-                logger.warning("真实同步失败，回退到 fixture: %s", exc)
-                warnings.append(f"真实同步失败（{exc}），已回退到内置示例数据。")
+        news_written, news_filtered, news_ok, news_errs, news_errors = _run_per_symbol(
+            _do_news, symbols,
+            max_workers=max_workers,
+            cancel_event=cancel_event, pause_event=pause_event,
+            progress=progress, label="news",
+        )
 
-        financial_rows = [row for symbol in symbols for row in _build_financial_rows(symbol, source_name)]
-        report_count = upsert_financial_reports(financial_rows)
-        summary = f"{source_name} 已同步 {len(symbols)} 只股票的财务摘要，共写入 {report_count} 条财报记录。"
+        if cancel_event and cancel_event.is_set():
+            total = news_written + market_news_written
+            return _cancel_sync(f"{source_name} 新闻同步被用户取消。写入 {total} 条记录。", news_errors)
 
-    # --- 新闻数据同步 ---
-    elif job["job_type"] == "news_sync":
-        symbols = _resolve_symbols(job)
-        if adapter and use_live:
-            try:
-                news_count = _live_news_sync(adapter, symbols, source_name)
-                # 同时同步个股公告，分析引擎 news_analyst 需要
-                ann_count = _live_announcement_sync(adapter, symbols, source_name)
-                summary = (
-                    f"{source_name} 已从真实接口同步 {len(symbols)} 只股票的新闻，"
-                    f"共写入 {news_count} 条新闻记录，{ann_count} 条公告。"
-                )
-                return SyncExecutionResult(status="completed", summary=summary, warnings=[])
-            except Exception as exc:
-                logger.warning("真实同步失败，回退到 fixture: %s", exc)
-                warnings.append(f"真实同步失败（{exc}），已回退到内置示例数据。")
+        # Announcements
+        ann_updated_at = _utc_now()
 
-        news_rows = [row for symbol in symbols for row in _build_news_rows(symbol, source_name)]
-        news_count = upsert_news_items(news_rows)
-        summary = f"{source_name} 已同步 {len(symbols)} 只股票的新闻样本，共写入 {news_count} 条新闻记录。"
-    else:
-        raise ValueError(f"不支持的同步任务类型：{job['job_type']}")
+        def _do_ann(sym: str) -> tuple[int, int, str | None]:
+            return _sync_single_announcement(adapter, sym, source_name, news_count_limit, ann_updated_at)
 
-    if warnings:
-        summary = f"{summary} 当前使用内置示例数据完成落库。"
+        ann_written, ann_filtered, ann_ok, ann_errs, ann_errors = _run_per_symbol(
+            _do_ann, symbols,
+            max_workers=max_workers,
+            cancel_event=cancel_event, pause_event=pause_event,
+            progress=progress, label="announcements",
+        )
 
-    return SyncExecutionResult(
-        status="completed_with_warnings" if warnings else "completed",
-        summary=summary,
-        warnings=warnings,
-    )
+        total_news = news_written + market_news_written
+        total_filtered = news_filtered + ann_filtered
+
+        all_warnings = market_news_errors + news_errors
+        if ann_written <= 0:
+            all_warnings.append("公告数据缺失。")
+        all_warnings.extend(ann_errors)
+        if total_filtered > 0:
+            all_warnings.append(f"过滤了 {total_filtered} 条脏数据。")
+
+        if total_news <= 0:
+            detail = _format_details(all_warnings, "未获取到任何新闻数据。")
+            return _fail_sync(f"{source_name} 新闻同步失败：{detail}", all_warnings)
+
+        summary = (
+            f"{source_name} 已同步 {news_ok}/{len(symbols)} 只股票的新闻数据（{sync_mode}模式），"
+            f"写入 {total_news} 条新闻记录"
+        )
+        if ann_written > 0:
+            summary += f"，并写入 {ann_written} 条公告记录"
+        if news_errs + ann_errs > 0:
+            summary += f"，{news_errs + ann_errs} 项失败"
+        if total_filtered > 0:
+            summary += f"，过滤 {total_filtered} 条脏数据"
+        summary += "。"
+        return _complete_sync(summary, all_warnings)
+
+    raise ValueError(f"不支持的同步任务类型：{job['job_type']}")
+
+
+def _live_index_sync(adapter, source_name: str, days: int = 60) -> tuple[int, list[str]]:
+    """Sync major index daily data."""
+    updated_at = _utc_now()
+    end_date = _utc_now().date()
+    start_date = end_date - timedelta(days=int(days * 1.5))
+    rows_to_write: list[dict[str, Any]] = []
+    errors: list[str] = []
+
+    for index_code in DEFAULT_INDEX_CODES:
+        try:
+            rows = _retry_fetch(
+                adapter.fetch_index_daily,
+                args=(index_code, start_date, end_date),
+                label=f"{source_name}/{index_code}/index",
+            )
+        except Exception as exc:
+            logger.warning("同步指数 %s 日线失败: %s", index_code, exc)
+            errors.append(f"{index_code} 指数抓取失败: {exc}")
+            continue
+
+        for row in rows:
+            row["source"] = source_name
+            row["updated_at"] = updated_at
+        rows_to_write.extend(rows)
+
+    return upsert_index_daily(rows_to_write), errors

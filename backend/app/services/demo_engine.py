@@ -8,7 +8,11 @@ from datetime import datetime, timezone
 
 from app.core.config import load_settings
 from app.services import repository
-from app.services.sync_service import execute_sync_job
+from app.services.sync_service import (
+    execute_sync_job,
+    register_job_signals,
+    unregister_job_signals,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -186,45 +190,103 @@ def process_analysis_task(task_id: str) -> None:
     repository.add_system_log("analysis", "INFO", f"任务 {task_id} 报告已落库。", task_id)
 
 
+SYNC_TIMEOUT_SECONDS = 3600
+
+
 def process_sync_job(job_id: str) -> None:
     job = repository.get_sync_job(job_id)
     if not job:
+        return
+    if job["status"] != "queued":
+        logger.info("跳过同步任务 %s，当前状态为 %s。", job_id, job["status"])
         return
 
     repository.update_sync_job(job_id, "running")
     repository.add_system_log("sync", "INFO", f"同步任务 {job_id} 开始执行。", job_id)
 
+    cancel_event, pause_event = register_job_signals(job_id)
+
+    def _progress_callback(
+        *,
+        total_items: int | None = None,
+        completed_items: int | None = None,
+        error_items: int | None = None,
+        skipped_items: int | None = None,
+        current_item: str | None = None,
+    ) -> None:
+        try:
+            repository.update_sync_job_progress(
+                job_id,
+                total_items=total_items,
+                completed_items=completed_items,
+                error_items=error_items,
+                skipped_items=skipped_items,
+                current_item=current_item,
+            )
+        except Exception:
+            pass  # Non-critical — don't break the sync for a progress update failure
+
     result_holder: list = [None, None]  # [result, exception]
 
     def _run() -> None:
         try:
-            result_holder[0] = execute_sync_job(job)
+            result_holder[0] = execute_sync_job(
+                job,
+                cancel_event=cancel_event,
+                pause_event=pause_event,
+                progress=_progress_callback,
+            )
         except Exception as exc:
             result_holder[1] = exc
 
     worker = threading.Thread(target=_run, daemon=True)
     worker.start()
-    worker.join(timeout=TASK_TIMEOUT_SECONDS)
+    worker.join(timeout=SYNC_TIMEOUT_SECONDS)
 
-    if worker.is_alive():
-        message = f"同步任务 {job_id} 执行超时（{TASK_TIMEOUT_SECONDS}s）。"
-        logger.warning(message)
-        repository.update_sync_job(job_id, "failed", result_summary=message)
-        repository.add_operation_log("sync", "timeout", "ERROR", message, job_id)
-        repository.add_system_log("sync", "ERROR", message, job_id)
-        return
+    try:
+        def _latest_job() -> dict | None:
+            return repository.get_sync_job(job_id)
 
-    if result_holder[1] is not None:
-        message = f"同步任务执行失败：{result_holder[1]}"
-        repository.update_sync_job(job_id, "failed", result_summary=message)
-        repository.add_operation_log("sync", "failed", "ERROR", message, job_id)
-        repository.add_system_log("sync", "ERROR", message, job_id)
-        return
+        def _is_cancelled() -> bool:
+            latest_job = _latest_job()
+            return latest_job is not None and latest_job["status"] == "cancelled"
 
-    result = result_holder[0]
-    log_level = "WARN" if result.status == "completed_with_warnings" else "INFO"
-    repository.update_sync_job(job_id, result.status, result_summary=result.summary)
-    repository.add_operation_log("sync", "complete", log_level, result.summary, job_id)
-    for warning in result.warnings:
-        repository.add_system_log("sync", "WARN", warning, job_id)
-    repository.add_system_log("sync", "INFO", f"同步任务 {job_id} 执行完成。", job_id)
+        if worker.is_alive():
+            cancel_event.set()  # Signal the worker to stop
+            worker.join(timeout=10)
+            if _is_cancelled():
+                return
+            message = f"同步任务 {job_id} 执行超时（{SYNC_TIMEOUT_SECONDS}s）。"
+            logger.warning(message)
+            repository.update_sync_job(job_id, "failed", result_summary=message)
+            repository.add_operation_log("sync", "timeout", "ERROR", message, job_id)
+            repository.add_system_log("sync", "ERROR", message, job_id)
+            return
+
+        if result_holder[1] is not None:
+            if _is_cancelled():
+                return
+            message = f"同步任务执行失败：{result_holder[1]}"
+            repository.update_sync_job(job_id, "failed", result_summary=message)
+            repository.add_operation_log("sync", "failed", "ERROR", message, job_id)
+            repository.add_system_log("sync", "ERROR", message, job_id)
+            return
+
+        result = result_holder[0]
+        if _is_cancelled():
+            latest_job = _latest_job()
+            summary = result.summary if result is not None and result.status == "cancelled" else (latest_job or {}).get("result_summary") or "用户手动取消。"
+            repository.update_sync_job(job_id, "cancelled", result_summary=summary)
+            if result is not None:
+                for warning in result.warnings:
+                    repository.add_system_log("sync", "WARN", warning, job_id)
+            return
+
+        log_level = "WARN" if result.status == "completed_with_warnings" else "INFO"
+        repository.update_sync_job(job_id, result.status, result_summary=result.summary)
+        repository.add_operation_log("sync", "complete", log_level, result.summary, job_id)
+        for warning in result.warnings:
+            repository.add_system_log("sync", "WARN", warning, job_id)
+        repository.add_system_log("sync", "INFO", f"同步任务 {job_id} 执行完成。", job_id)
+    finally:
+        unregister_job_signals(job_id)

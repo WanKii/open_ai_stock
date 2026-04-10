@@ -690,3 +690,41 @@ def delete_stock_data(symbol: str, source: str, data_type: str) -> int:
         )
 
     return count_before
+
+
+_ALL_TABLES = [
+    "daily_quotes", "financial_reports", "news_items", "announcements",
+    "index_daily", "sector_daily", "symbol_master", "company_profile",
+    "realtime_quote_cache",
+]
+
+
+def truncate_all_tables() -> dict[str, int]:
+    """Delete ALL data from all market tables. Returns {table: deleted_count}."""
+    result: dict[str, int] = {}
+    with get_market_connection() as connection:
+        for table in _ALL_TABLES:
+            count = connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            connection.execute(f"DELETE FROM {table}")
+            result[table] = count
+    return result
+
+
+def truncate_by_source(source: str) -> dict[str, int]:
+    """Delete all data for a given source. Returns {table: deleted_count}."""
+    # Keep symbol metadata intact: symbol_master/company_profile are shared by the app
+    # and keyed only by symbol, so deleting them by source can hide data that still exists
+    # in other source-partitioned tables.
+    source_tables = [
+        "daily_quotes", "financial_reports", "news_items", "announcements",
+        "index_daily", "sector_daily", "realtime_quote_cache",
+    ]
+    result: dict[str, int] = {}
+    with get_market_connection() as connection:
+        for table in source_tables:
+            count = connection.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE source = ?", [source]
+            ).fetchone()[0]
+            connection.execute(f"DELETE FROM {table} WHERE source = ?", [source])
+            result[table] = count
+    return result
