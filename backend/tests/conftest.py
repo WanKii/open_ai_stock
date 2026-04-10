@@ -36,6 +36,16 @@ def _init_app():
     init_db()
     init_market_store()
     _cfg.load_settings()
+
+    # Disable retries and backoff in tests to avoid slow sleeps
+    import app.services.sync_service as _sync_svc
+    _sync_svc.DEFAULT_MAX_RETRIES = 1
+    _sync_svc.RETRY_BACKOFF_SECONDS = [0]
+
+    # Use a short timeout for sync jobs in tests
+    import app.services.demo_engine as _demo_eng
+    _demo_eng.SYNC_TIMEOUT_SECONDS = 30
+
     yield
     # Cleanup temp dir
     shutil.rmtree(_tmp_dir, ignore_errors=True)

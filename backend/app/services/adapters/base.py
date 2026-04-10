@@ -10,6 +10,10 @@ from datetime import date
 from typing import Any
 
 
+class DataFetchError(RuntimeError):
+    """Raised when a datasource request fails and should not be treated as an empty result."""
+
+
 class DataSourceAdapter(ABC):
     """统一数据源适配器接口。"""
 

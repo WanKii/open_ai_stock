@@ -102,6 +102,11 @@ class SyncJob(BaseModel):
     params: dict[str, Any]
     status: TaskStatus
     result_summary: str | None = None
+    total_items: int = 0
+    completed_items: int = 0
+    error_items: int = 0
+    skipped_items: int = 0
+    current_item: str | None = None
     created_at: datetime
     started_at: datetime | None = None
     finished_at: datetime | None = None

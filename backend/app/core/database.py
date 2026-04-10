@@ -50,6 +50,11 @@ def init_db() -> None:
                 params_json TEXT NOT NULL,
                 status TEXT NOT NULL,
                 result_summary TEXT,
+                total_items INTEGER NOT NULL DEFAULT 0,
+                completed_items INTEGER NOT NULL DEFAULT 0,
+                error_items INTEGER NOT NULL DEFAULT 0,
+                skipped_items INTEGER NOT NULL DEFAULT 0,
+                current_item TEXT,
                 created_at TEXT NOT NULL,
                 started_at TEXT,
                 finished_at TEXT
@@ -75,6 +80,18 @@ def init_db() -> None:
             );
             """
         )
+        # Migrate: add progress columns if missing (for existing databases)
+        existing = {row[1] for row in connection.execute("PRAGMA table_info(sync_jobs)").fetchall()}
+        migrations = [
+            ("total_items", "INTEGER NOT NULL DEFAULT 0"),
+            ("completed_items", "INTEGER NOT NULL DEFAULT 0"),
+            ("error_items", "INTEGER NOT NULL DEFAULT 0"),
+            ("skipped_items", "INTEGER NOT NULL DEFAULT 0"),
+            ("current_item", "TEXT"),
+        ]
+        for col_name, col_type in migrations:
+            if col_name not in existing:
+                connection.execute(f"ALTER TABLE sync_jobs ADD COLUMN {col_name} {col_type}")
 
 
 @contextmanager

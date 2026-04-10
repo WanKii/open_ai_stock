@@ -144,8 +144,10 @@ def test_delete_stock_data(client):
 
 # ---- Sync by source ----
 
-def test_sync_stock_by_source(client):
+def test_sync_stock_by_source(client, monkeypatch):
     _seed_data()
+    # Prevent background sync from actually running (blocks TestClient)
+    monkeypatch.setattr("app.api.stocks.process_sync_job", lambda job_id: None)
     resp = client.post(f"/api/stocks/{_SYMBOL}/sync", json={"source": "akshare"})
     assert resp.status_code == 200
     jobs = resp.json()

@@ -48,6 +48,11 @@ def _sync_job_from_row(row: Any) -> dict[str, Any]:
         "params": _parse_json(row["params_json"], {}),
         "status": row["status"],
         "result_summary": row["result_summary"],
+        "total_items": row["total_items"] if "total_items" in row.keys() else 0,
+        "completed_items": row["completed_items"] if "completed_items" in row.keys() else 0,
+        "error_items": row["error_items"] if "error_items" in row.keys() else 0,
+        "skipped_items": row["skipped_items"] if "skipped_items" in row.keys() else 0,
+        "current_item": row["current_item"] if "current_item" in row.keys() else None,
         "created_at": _parse_datetime(row["created_at"]),
         "started_at": _parse_datetime(row["started_at"]),
         "finished_at": _parse_datetime(row["finished_at"]),
@@ -379,3 +384,46 @@ def update_sync_job(job_id: str, status: str, result_summary: str | None = None)
                 """,
                 (status, finished_at, result_summary, job_id),
             )
+
+
+def update_sync_job_progress(
+    job_id: str,
+    *,
+    total_items: int | None = None,
+    completed_items: int | None = None,
+    error_items: int | None = None,
+    skipped_items: int | None = None,
+    current_item: str | None = None,
+) -> None:
+    """Update progress fields on a running sync job."""
+    sets: list[str] = []
+    params: list[Any] = []
+    if total_items is not None:
+        sets.append("total_items = ?")
+        params.append(total_items)
+    if completed_items is not None:
+        sets.append("completed_items = ?")
+        params.append(completed_items)
+    if error_items is not None:
+        sets.append("error_items = ?")
+        params.append(error_items)
+    if skipped_items is not None:
+        sets.append("skipped_items = ?")
+        params.append(skipped_items)
+    if current_item is not None:
+        sets.append("current_item = ?")
+        params.append(current_item)
+    if not sets:
+        return
+    params.append(job_id)
+    sql = f"UPDATE sync_jobs SET {', '.join(sets)} WHERE id = ?"
+    with get_connection() as connection:
+        connection.execute(sql, params)
+
+
+def delete_all_sync_jobs() -> int:
+    """Delete all sync job records. Returns deleted count."""
+    with get_connection() as connection:
+        count = connection.execute("SELECT COUNT(*) FROM sync_jobs").fetchone()[0]
+        connection.execute("DELETE FROM sync_jobs")
+    return count

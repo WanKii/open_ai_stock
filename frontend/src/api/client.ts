@@ -156,6 +156,48 @@ export function createSyncJob(payload: {
   });
 }
 
+export function cancelSyncJob(jobId: string) {
+  return request<{ status: string }>(`/sync/jobs/${jobId}/cancel`, { method: "POST" });
+}
+
+export function pauseSyncJob(jobId: string) {
+  return request<{ status: string }>(`/sync/jobs/${jobId}/pause`, { method: "POST" });
+}
+
+export function resumeSyncJob(jobId: string) {
+  return request<{ status: string }>(`/sync/jobs/${jobId}/resume`, { method: "POST" });
+}
+
+export function createFullSync(payload: {
+  source: string;
+  sync_mode: string;
+  max_workers: number;
+}) {
+  return request<SyncJob[]>("/sync/full", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export function resetAllData(confirm: string) {
+  return request<{ deleted_data: Record<string, number>; deleted_jobs: number; total_records: number }>(
+    "/sync/reset",
+    { method: "POST", body: JSON.stringify({ confirm }) }
+  );
+}
+
+export function resetSourceData(source: string, confirm: string) {
+  return request<{ source: string; deleted: Record<string, number>; total_records: number }>(
+    `/sync/reset/${source}`,
+    { method: "POST", body: JSON.stringify({ confirm }) }
+  );
+}
+
+export function getSyncProgressStreamUrl(jobIds?: string[]) {
+  const query = jobIds?.length ? `?job_ids=${jobIds.join(",")}` : "";
+  return `${baseUrl}/sync/progress/stream${query}`;
+}
+
 // ---------------------------------------------------------------------------
 // 股票数据管理
 // ---------------------------------------------------------------------------

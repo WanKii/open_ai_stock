@@ -1,33 +1,36 @@
-"""AKShare 数据源适配器。
-
-AKShare 是开源免费的 A 股数据接口，不需要 Token。
-文档: https://akshare.akfamily.xyz/
-"""
+"""AKShare datasource adapter."""
 from __future__ import annotations
 
 import hashlib
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
-from .base import DataSourceAdapter
+from .base import DataFetchError, DataSourceAdapter
 
 logger = logging.getLogger(__name__)
 
 
 def _import_akshare():
-    """惰性导入 akshare，避免未安装时启动报错。"""
+    """Import akshare lazily so startup does not require the dependency."""
     import akshare as ak  # type: ignore[import-untyped]
+
     return ak
 
 
 class AKShareAdapter(DataSourceAdapter):
     name = "akshare"
 
+    _INDEX_CODE_MAP: dict[str, str] = {
+        "000300.SH": "000300",
+        "000001.SH": "000001",
+        "399001.SZ": "399001",
+        "399006.SZ": "399006",
+    }
+
     def test_connection(self) -> tuple[bool, str]:
         try:
             ak = _import_akshare()
-            # 用一次轻量调用验证连接（交易日历数据量极小，不易被断连）
             df = ak.tool_trade_date_hist_sina()
             if df is not None and len(df) > 0:
                 return True, f"AKShare 连接正常，获取到 {len(df)} 条交易日历数据。"
@@ -48,6 +51,7 @@ class AKShareAdapter(DataSourceAdapter):
             code = str(row.get("代码", "")).strip()
             if not code:
                 continue
+
             symbol = self.normalize_symbol(code)
             exchange = "SH" if symbol.endswith(".SH") else "SZ"
             rows.append(
@@ -79,7 +83,7 @@ class AKShareAdapter(DataSourceAdapter):
             )
         except Exception as exc:
             logger.warning("AKShare 获取 %s 日线失败: %s", symbol, exc)
-            return []
+            raise DataFetchError(f"{symbol} 日线抓取失败: {exc}") from exc
 
         if df is None or df.empty:
             return []
@@ -118,55 +122,51 @@ class AKShareAdapter(DataSourceAdapter):
         code = self.strip_suffix(symbol)
 
         try:
-            # 利润表
             df_profit = ak.stock_financial_benefit_ths(symbol=code, indicator="按报告期")
         except Exception as exc:
             logger.warning("AKShare 获取 %s 利润表失败: %s", symbol, exc)
             df_profit = None
 
         try:
-            # 资产负债表 — 获取 ROE 等
-            df_balance = ak.stock_financial_analysis_indicator(symbol=code, start_year="2020")
+            df_indicator = ak.stock_financial_analysis_indicator(symbol=code, start_year="2020")
         except Exception as exc:
             logger.warning("AKShare 获取 %s 财务指标失败: %s", symbol, exc)
-            df_balance = None
+            df_indicator = None
 
         rows: list[dict[str, Any]] = []
+        if df_profit is None or df_profit.empty:
+            return rows
 
-        if df_profit is not None and not df_profit.empty:
-            for _, row in df_profit.head(periods).iterrows():
-                report_date_raw = str(row.get("报告期", ""))
-                try:
-                    report_date = datetime.strptime(report_date_raw[:10], "%Y-%m-%d").date()
-                except (ValueError, TypeError):
-                    continue
+        for _, row in df_profit.head(periods).iterrows():
+            report_date_raw = str(row.get("报告期", ""))
+            try:
+                report_date = datetime.strptime(report_date_raw[:10], "%Y-%m-%d").date()
+            except (ValueError, TypeError):
+                continue
 
-                revenue = self._safe_float(row.get("营业总收入"))
-                net_profit = self._safe_float(row.get("净利润"))
+            revenue = self._safe_float(row.get("营业总收入"))
+            net_profit = self._safe_float(row.get("净利润"))
 
-                # 尝试从指标表匹配 ROE 和毛利率
-                roe = 0.0
-                gross_margin = 0.0
-                if df_balance is not None and not df_balance.empty:
-                    matched = df_balance[
-                        df_balance.get("报告期", df_balance.iloc[:, 0]).astype(str).str[:10]
-                        == report_date_raw[:10]
-                    ]
-                    if not matched.empty:
-                        roe = self._safe_float(matched.iloc[0].get("净资产收益率"))
-                        gross_margin = self._safe_float(matched.iloc[0].get("销售毛利率"))
+            roe = 0.0
+            gross_margin = 0.0
+            if df_indicator is not None and not df_indicator.empty:
+                indicator_date_series = df_indicator.get("报告期", df_indicator.iloc[:, 0])
+                matched = df_indicator[indicator_date_series.astype(str).str[:10] == report_date_raw[:10]]
+                if not matched.empty:
+                    roe = self._safe_float(matched.iloc[0].get("净资产收益率"))
+                    gross_margin = self._safe_float(matched.iloc[0].get("销售毛利率"))
 
-                rows.append(
-                    {
-                        "symbol": symbol,
-                        "report_date": report_date,
-                        "report_type": "quarterly",
-                        "revenue": revenue,
-                        "net_profit": net_profit,
-                        "roe": roe,
-                        "gross_margin": gross_margin,
-                    }
-                )
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "report_date": report_date,
+                    "report_type": "quarterly",
+                    "revenue": revenue,
+                    "net_profit": net_profit,
+                    "roe": roe,
+                    "gross_margin": gross_margin,
+                }
+            )
         return rows
 
     def fetch_news(self, symbol: str, count: int = 20) -> list[dict[str, Any]]:
@@ -211,18 +211,9 @@ class AKShareAdapter(DataSourceAdapter):
             )
         return rows
 
-    # AKShare 指数代码映射：Tushare 格式 → AKShare 格式
-    _INDEX_CODE_MAP: dict[str, str] = {
-        "000300.SH": "000300",  # 沪深300
-        "000001.SH": "000001",  # 上证指数
-        "399001.SZ": "399001",  # 深证成指
-        "399006.SZ": "399006",  # 创业板指
-    }
-
     def fetch_index_daily(
         self, index_code: str, start_date: date, end_date: date
     ) -> list[dict[str, Any]]:
-        """获取指数日线行情。"""
         ak = _import_akshare()
         ak_code = self._INDEX_CODE_MAP.get(index_code, self.strip_suffix(index_code))
 
@@ -235,7 +226,7 @@ class AKShareAdapter(DataSourceAdapter):
             )
         except Exception as exc:
             logger.warning("AKShare 获取指数 %s 日线失败: %s", index_code, exc)
-            return []
+            raise DataFetchError(f"{index_code} 指数日线抓取失败: {exc}") from exc
 
         if df is None or df.empty:
             return []
@@ -247,58 +238,63 @@ class AKShareAdapter(DataSourceAdapter):
                 trade_date = datetime.strptime(trade_date_str[:10], "%Y-%m-%d").date()
             except (ValueError, TypeError):
                 continue
-            close = self._safe_float(row.get("收盘"))
-            change_pct = self._safe_float(row.get("涨跌幅"))
+
             rows.append(
                 {
                     "index_code": index_code,
                     "trade_date": trade_date,
-                    "close": close,
-                    "change_pct": change_pct,
+                    "close": self._safe_float(row.get("收盘")),
+                    "change_pct": self._safe_float(row.get("涨跌幅")),
                 }
             )
         return rows
 
     def fetch_announcements(self, symbol: str, count: int = 20) -> list[dict[str, Any]]:
-        """获取个股公告。"""
         ak = _import_akshare()
         code = self.strip_suffix(symbol)
-
-        try:
-            df = ak.stock_notice_report(symbol=code)
-        except Exception as exc:
-            logger.warning("AKShare 获取 %s 公告失败: %s", symbol, exc)
-            return []
-
-        if df is None or df.empty:
-            return []
-
         rows: list[dict[str, Any]] = []
-        for _, row in df.head(count).iterrows():
-            title = str(row.get("公告标题", row.get("title", "")))
-            pub_str = str(row.get("公告日期", row.get("date", "")))
-            url = str(row.get("公告链接", row.get("url", "")))
+        seen_ids: set[str] = set()
 
+        for day_offset in range(7):
+            query_date = (date.today() - timedelta(days=day_offset)).strftime("%Y%m%d")
             try:
-                published_at = datetime.strptime(pub_str[:10], "%Y-%m-%d")
-                published_at = published_at.replace(tzinfo=timezone.utc)
-            except (ValueError, TypeError):
-                published_at = datetime.now(timezone.utc)
+                df = ak.stock_notice_report(symbol="全部", date=query_date)
+            except Exception as exc:
+                logger.warning("AKShare 获取 %s 公告失败: %s", symbol, exc)
+                raise DataFetchError(f"{symbol} 公告抓取失败: {exc}") from exc
 
-            ann_id = hashlib.sha256(
-                f"akshare:{symbol}:{title}:{pub_str}".encode()
-            ).hexdigest()[:16]
+            if df is None or df.empty:
+                continue
 
-            rows.append(
-                {
-                    "announcement_id": f"akshare:{ann_id}",
-                    "symbol": symbol,
-                    "published_at": published_at,
-                    "title": title,
-                    "content": title,  # AKShare 公告接口通常仅返回标题
-                    "url": url,
-                }
-            )
+            for _, row in df.iterrows():
+                row_code = _normalize_notice_code(row.get("代码", row.get("stock_code", "")))
+                if row_code != code:
+                    continue
+
+                title = str(row.get("公告标题", row.get("title", ""))).strip()
+                url = str(row.get("网址", row.get("公告链接", row.get("url", "")))).strip()
+                published_at = _coerce_datetime(
+                    row.get("公告日期", row.get("date", row.get("公告时间", "")))
+                ) or datetime.now(timezone.utc)
+                identity = url or f"{row_code}:{title}:{published_at.isoformat()}"
+                ann_id = hashlib.sha256(identity.encode()).hexdigest()[:16]
+                if ann_id in seen_ids:
+                    continue
+
+                seen_ids.add(ann_id)
+                rows.append(
+                    {
+                        "announcement_id": f"akshare:{ann_id}",
+                        "symbol": symbol,
+                        "published_at": published_at,
+                        "title": title,
+                        "content": title,
+                        "url": url,
+                    }
+                )
+                if len(rows) >= count:
+                    return rows
+
         return rows
 
     @staticmethod
@@ -306,7 +302,32 @@ class AKShareAdapter(DataSourceAdapter):
         if value is None:
             return default
         try:
-            v = float(str(value).replace(",", "").replace("--", "0"))
-            return v
+            return float(str(value).replace(",", "").replace("--", "0"))
         except (ValueError, TypeError):
             return default
+
+
+def _normalize_notice_code(value: Any) -> str:
+    text = str(value or "").strip()
+    if text.endswith(".0"):
+        text = text[:-2]
+    return text.zfill(6) if text.isdigit() else text
+
+
+def _coerce_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, date):
+        return datetime.combine(value, datetime.min.time(), tzinfo=timezone.utc)
+
+    text = str(value or "").strip()
+    if not text:
+        return None
+
+    for fmt, width in (("%Y-%m-%d %H:%M:%S", 19), ("%Y-%m-%d", 10)):
+        try:
+            parsed = datetime.strptime(text[:width], fmt)
+            return parsed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return None

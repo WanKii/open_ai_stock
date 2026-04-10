@@ -121,6 +121,11 @@ export interface SyncJob {
   params: Record<string, unknown>;
   status: TaskStatus;
   result_summary?: string | null;
+  total_items: number;
+  completed_items: number;
+  error_items: number;
+  skipped_items: number;
+  current_item?: string | null;
   created_at: string;
   started_at?: string | null;
   finished_at?: string | null;
