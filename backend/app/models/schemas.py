@@ -225,3 +225,49 @@ class StockDataPageResponse(BaseModel):
 
 class DeleteDataResponse(BaseModel):
     deleted_count: int
+
+
+# ---------------------------------------------------------------------------
+# FR-105 报告对比
+# ---------------------------------------------------------------------------
+
+
+class ComparisonAgentSummary(BaseModel):
+    agent_type: str
+    confidence: int
+    score_delta: int
+    summary: str
+
+
+class ComparisonReport(BaseModel):
+    task_id: str
+    symbol: str
+    depth: AnalysisDepth
+    created_at: datetime
+    overall_score: int
+    action_tag: str
+    confidence: int
+    thesis: str
+    bull_points: list[str]
+    bear_points: list[str]
+    agent_reports: list[ComparisonAgentSummary]
+
+
+# ---------------------------------------------------------------------------
+# FR-110 数据质量仪表板
+# ---------------------------------------------------------------------------
+
+
+class TableQualityStat(BaseModel):
+    table_name: str
+    row_count: int
+    distinct_symbols: int
+    latest_date: str | None = None
+    oldest_date: str | None = None
+    sources: list[str]
+
+
+class DataQualityOverview(BaseModel):
+    total_symbols: int
+    tables: list[TableQualityStat]
+    updated_at: datetime

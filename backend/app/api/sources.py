@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter
 
 from app.core.config import load_settings
-from app.models.schemas import DataSourceStatus
+from app.core.market_store import get_data_quality_overview
+from app.models.schemas import DataQualityOverview, DataSourceStatus, TableQualityStat
 from app.services.sync_service import describe_source_status
 
 
@@ -30,3 +33,13 @@ def get_source_status() -> list[DataSourceStatus]:
         )
 
     return statuses
+
+
+@router.get("/quality", response_model=DataQualityOverview)
+def get_data_quality() -> DataQualityOverview:
+    overview = get_data_quality_overview()
+    return DataQualityOverview(
+        total_symbols=overview["total_symbols"],
+        tables=[TableQualityStat(**t) for t in overview["tables"]],
+        updated_at=datetime.now(timezone.utc),
+    )

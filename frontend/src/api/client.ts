@@ -1,6 +1,8 @@
 import type {
   AnalysisReport,
   AnalysisTask,
+  ComparisonReport,
+  DataQualityOverview,
   DataSourceStatus,
   LogEntry,
   StockDataPageResponse,
@@ -109,6 +111,10 @@ export function getAnalysisReport(taskId: string) {
   return request<AnalysisReport>(`/analysis/tasks/${taskId}/report`);
 }
 
+export function compareReports(taskIds: string[]) {
+  return request<ComparisonReport[]>(`/analysis/compare?task_ids=${taskIds.join(",")}`);
+}
+
 export function getAnalysisTaskStreamUrl(taskId: string) {
   return `${baseUrl}/analysis/tasks/${encodeURIComponent(taskId)}/stream`;
 }
@@ -142,6 +148,10 @@ export function listLogs(params: { kind?: "all" | "operation" | "system"; level?
 
 export function getSourceStatuses() {
   return request<DataSourceStatus[]>("/data-sources/status");
+}
+
+export function getDataQuality() {
+  return request<DataQualityOverview>("/data-sources/quality");
 }
 
 export function listSyncJobs() {

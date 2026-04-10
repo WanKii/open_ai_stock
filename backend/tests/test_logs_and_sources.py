@@ -52,3 +52,27 @@ def test_test_connection_unknown_provider(client):
     assert resp.status_code == 200
     data = resp.json()
     assert data["success"] is False
+
+
+# ---------------------------------------------------------------------------
+# FR-110 数据质量仪表板
+# ---------------------------------------------------------------------------
+
+
+def test_get_data_quality_overview(client):
+    resp = client.get("/api/data-sources/quality")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "total_symbols" in data
+    assert isinstance(data["total_symbols"], int)
+    assert "tables" in data
+    assert isinstance(data["tables"], list)
+    assert len(data["tables"]) == 8  # 8 market tables
+    assert "updated_at" in data
+
+    for table in data["tables"]:
+        assert "table_name" in table
+        assert "row_count" in table
+        assert "distinct_symbols" in table
+        assert "sources" in table
+        assert isinstance(table["sources"], list)

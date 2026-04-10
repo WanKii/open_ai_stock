@@ -8,7 +8,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException
 from fastapi.responses import StreamingResponse
 
 from app.core.config import load_settings
-from app.models.schemas import AnalysisReport, AnalysisTask, AnalysisTaskCreate, TaskCreatedResponse
+from app.models.schemas import AnalysisReport, AnalysisTask, AnalysisTaskCreate, ComparisonReport, TaskCreatedResponse
 from app.services import repository
 from app.services.analysis_engine import process_analysis_task
 
@@ -95,3 +95,41 @@ def get_analysis_report(task_id: str) -> AnalysisReport:
     if not report:
         raise HTTPException(status_code=404, detail="报告尚未生成。")
     return AnalysisReport.model_validate(report)
+
+
+@router.get("/compare", response_model=list[ComparisonReport])
+def compare_reports(task_ids: str) -> list[ComparisonReport]:
+    """对比多个分析报告。task_ids 为逗号分隔的任务 ID。"""
+    id_list = [tid.strip() for tid in task_ids.split(",") if tid.strip()]
+    if len(id_list) < 2:
+        raise HTTPException(status_code=400, detail="至少需要两个任务 ID 进行对比。")
+    if len(id_list) > 5:
+        raise HTTPException(status_code=400, detail="最多支持 5 个任务同时对比。")
+
+    results: list[ComparisonReport] = []
+    for tid in id_list:
+        task = repository.get_task(tid)
+        if not task:
+            raise HTTPException(status_code=404, detail=f"任务 {tid} 不存在。")
+        report = repository.get_report(tid)
+        if not report:
+            raise HTTPException(status_code=404, detail=f"任务 {tid} 的报告尚未生成。")
+        results.append(
+            ComparisonReport.model_validate(
+                {
+                    "task_id": tid,
+                    "symbol": task["symbol"],
+                    "depth": task["depth"],
+                    "created_at": task["created_at"],
+                    "overall_score": report["overall_score"],
+                    "action_tag": report["action_tag"],
+                    "confidence": report["confidence"],
+                    "thesis": report["thesis"],
+                    "bull_points": report["bull_points"],
+                    "bear_points": report["bear_points"],
+                    "agent_reports": report.get("agent_reports", []),
+                }
+            )
+        )
+
+    return results

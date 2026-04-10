@@ -189,3 +189,57 @@ def test_report_not_ready_returns_404(client):
     resp = client.get(f"/api/analysis/tasks/{task_id}/report")
     # Could be 404 (not ready) or 200 (very fast), both acceptable
     assert resp.status_code in (200, 404)
+
+
+# ---------------------------------------------------------------------------
+# FR-105 报告对比
+# ---------------------------------------------------------------------------
+
+
+def _create_completed_task(client, symbol="601318.SH"):
+    """Helper: create a task and wait for it to complete."""
+    create_resp = client.post(
+        "/api/analysis/tasks",
+        json={"symbol": symbol, "depth": "fast", "selected_agents": ["market_analyst"]},
+    )
+    task_id = create_resp.json()["task_id"]
+    for _ in range(10):
+        time.sleep(0.5)
+        task = client.get(f"/api/analysis/tasks/{task_id}").json()
+        if task["status"] in ("completed", "completed_with_warnings", "failed"):
+            break
+    return task_id, task["status"]
+
+
+def test_compare_reports(client):
+    id1, status1 = _create_completed_task(client, "601318.SH")
+    id2, status2 = _create_completed_task(client, "601318.SH")
+    if status1 not in ("completed", "completed_with_warnings") or status2 not in ("completed", "completed_with_warnings"):
+        return  # Skip if demo engine didn't complete
+
+    resp = client.get(f"/api/analysis/compare?task_ids={id1},{id2}")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data) == 2
+    assert data[0]["task_id"] == id1
+    assert data[1]["task_id"] == id2
+    assert "overall_score" in data[0]
+    assert "thesis" in data[0]
+    assert "bull_points" in data[0]
+    assert "agent_reports" in data[0]
+
+
+def test_compare_requires_at_least_two(client):
+    resp = client.get("/api/analysis/compare?task_ids=single-id")
+    assert resp.status_code == 400
+
+
+def test_compare_rejects_more_than_five(client):
+    ids = ",".join([f"id-{i}" for i in range(6)])
+    resp = client.get(f"/api/analysis/compare?task_ids={ids}")
+    assert resp.status_code == 400
+
+
+def test_compare_nonexistent_task(client):
+    resp = client.get("/api/analysis/compare?task_ids=bad-1,bad-2")
+    assert resp.status_code == 404

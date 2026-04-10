@@ -741,3 +741,137 @@ def truncate_by_source(source: str) -> dict[str, int]:
             connection.execute(f"DELETE FROM {table} WHERE source = ?", [source])
             result[table] = count
     return result
+
+
+# ---------------------------------------------------------------------------
+# FR-110 数据质量仪表板
+# ---------------------------------------------------------------------------
+
+_QUALITY_QUERIES: list[tuple[str, str]] = [
+    (
+        "symbol_master",
+        """
+        SELECT COUNT(*) AS row_count,
+               COUNT(DISTINCT symbol) AS distinct_symbols,
+               MAX(updated_at)::TEXT AS latest_date,
+               MIN(updated_at)::TEXT AS oldest_date,
+               LIST(DISTINCT source) AS sources
+        FROM symbol_master
+        """,
+    ),
+    (
+        "company_profile",
+        """
+        SELECT COUNT(*) AS row_count,
+               COUNT(DISTINCT symbol) AS distinct_symbols,
+               MAX(updated_at)::TEXT AS latest_date,
+               MIN(updated_at)::TEXT AS oldest_date,
+               LIST(DISTINCT source) AS sources
+        FROM company_profile
+        """,
+    ),
+    (
+        "daily_quotes",
+        """
+        SELECT COUNT(*) AS row_count,
+               COUNT(DISTINCT symbol) AS distinct_symbols,
+               MAX(trade_date)::TEXT AS latest_date,
+               MIN(trade_date)::TEXT AS oldest_date,
+               LIST(DISTINCT source) AS sources
+        FROM daily_quotes
+        """,
+    ),
+    (
+        "financial_reports",
+        """
+        SELECT COUNT(*) AS row_count,
+               COUNT(DISTINCT symbol) AS distinct_symbols,
+               MAX(report_date)::TEXT AS latest_date,
+               MIN(report_date)::TEXT AS oldest_date,
+               LIST(DISTINCT source) AS sources
+        FROM financial_reports
+        """,
+    ),
+    (
+        "news_items",
+        """
+        SELECT COUNT(*) AS row_count,
+               COUNT(DISTINCT symbol) AS distinct_symbols,
+               MAX(published_at)::TEXT AS latest_date,
+               MIN(published_at)::TEXT AS oldest_date,
+               LIST(DISTINCT source) AS sources
+        FROM news_items
+        """,
+    ),
+    (
+        "announcements",
+        """
+        SELECT COUNT(*) AS row_count,
+               COUNT(DISTINCT symbol) AS distinct_symbols,
+               MAX(published_at)::TEXT AS latest_date,
+               MIN(published_at)::TEXT AS oldest_date,
+               LIST(DISTINCT source) AS sources
+        FROM announcements
+        """,
+    ),
+    (
+        "index_daily",
+        """
+        SELECT COUNT(*) AS row_count,
+               COUNT(DISTINCT index_code) AS distinct_symbols,
+               MAX(trade_date)::TEXT AS latest_date,
+               MIN(trade_date)::TEXT AS oldest_date,
+               LIST(DISTINCT source) AS sources
+        FROM index_daily
+        """,
+    ),
+    (
+        "sector_daily",
+        """
+        SELECT COUNT(*) AS row_count,
+               COUNT(DISTINCT sector_code) AS distinct_symbols,
+               MAX(trade_date)::TEXT AS latest_date,
+               MIN(trade_date)::TEXT AS oldest_date,
+               LIST(DISTINCT source) AS sources
+        FROM sector_daily
+        """,
+    ),
+]
+
+
+def get_data_quality_overview() -> dict[str, Any]:
+    """返回所有 DuckDB 市场数据表的质量概览。"""
+    tables: list[dict[str, Any]] = []
+    total_symbols = 0
+
+    with get_market_connection() as connection:
+        # 总股票数
+        total_row = connection.execute("SELECT COUNT(*) FROM symbol_master").fetchone()
+        total_symbols = total_row[0] if total_row else 0
+
+        for table_name, sql in _QUALITY_QUERIES:
+            row = connection.execute(sql).fetchone()
+            if row:
+                sources_raw = row[4] if row[4] else []
+                tables.append({
+                    "table_name": table_name,
+                    "row_count": row[0] or 0,
+                    "distinct_symbols": row[1] or 0,
+                    "latest_date": row[2],
+                    "oldest_date": row[3],
+                    "sources": list(sources_raw) if sources_raw else [],
+                })
+            else:
+                tables.append({
+                    "table_name": table_name,
+                    "row_count": 0,
+                    "distinct_symbols": 0,
+                    "latest_date": None,
+                    "oldest_date": None,
+                    "sources": [],
+                })
+
+    return {
+        "total_symbols": total_symbols,
+        "tables": tables,
+    }

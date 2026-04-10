@@ -193,3 +193,47 @@ export interface StockDataPageResponse {
   page_size: number;
   columns: string[];
 }
+
+// ---------------------------------------------------------------------------
+// FR-105 报告对比
+// ---------------------------------------------------------------------------
+
+export interface ComparisonAgentSummary {
+  agent_type: string;
+  confidence: number;
+  score_delta: number;
+  summary: string;
+}
+
+export interface ComparisonReport {
+  task_id: string;
+  symbol: string;
+  depth: AnalysisDepth;
+  created_at: string;
+  overall_score: number;
+  action_tag: string;
+  confidence: number;
+  thesis: string;
+  bull_points: string[];
+  bear_points: string[];
+  agent_reports: ComparisonAgentSummary[];
+}
+
+// ---------------------------------------------------------------------------
+// FR-110 数据质量仪表板
+// ---------------------------------------------------------------------------
+
+export interface TableQualityStat {
+  table_name: string;
+  row_count: number;
+  distinct_symbols: number;
+  latest_date?: string | null;
+  oldest_date?: string | null;
+  sources: string[];
+}
+
+export interface DataQualityOverview {
+  total_symbols: number;
+  tables: TableQualityStat[];
+  updated_at: string;
+}
