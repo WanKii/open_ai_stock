@@ -27,7 +27,7 @@
                   <strong>{{ item.symbol }}</strong>
                   <span>{{ item.name }}</span>
                 </div>
-                <small>{{ item.exchange }} · {{ item.industry || item.area || "已同步基础信息" }}</small>
+                <small>{{ item.exchange }} / {{ item.industry || item.area || "已同步基础信息" }}</small>
               </div>
             </template>
           </el-autocomplete>
@@ -58,7 +58,7 @@
           <el-button type="primary" size="large" :loading="submitting" @click="submitAnalysis">
             开始智能分析
           </el-button>
-          <span class="muted">默认会保存任务、报告、提示词快照与日志。</span>
+          <span class="muted">任务、报告、提示词快照与日志会自动持久化。</span>
         </div>
       </el-form>
     </section>
@@ -80,9 +80,12 @@
           :class="{ 'task-item--active': task.id === selectedTaskId }"
           @click="selectedTaskId = task.id"
         >
-          <div>
+          <div class="task-item__body">
             <strong>{{ task.symbol }}</strong>
             <p>{{ depthLabelMap[task.depth] }} / {{ task.selected_agents.length }} 个角色</p>
+            <small v-if="task.status === 'running' || task.status === 'queued'">
+              {{ task.progress.current_step }}
+            </small>
           </div>
           <StatusBadge
             :label="statusLabelMap[task.status]"
@@ -100,11 +103,17 @@
           <p class="eyebrow">REPORT</p>
           <h3>报告概览</h3>
         </div>
-        <StatusBadge
-          v-if="selectedTask"
-          :label="isReportReady(selectedTask.status) ? '报告已就绪' : '等待生成中'"
-          :tone="isReportReady(selectedTask.status) ? 'good' : 'warn'"
-        />
+        <div class="report-status">
+          <StatusBadge
+            v-if="selectedTask"
+            :label="isReportReady(selectedTask.status) ? '报告已就绪' : '实时推送中'"
+            :tone="isReportReady(selectedTask.status) ? 'good' : 'warn'"
+            :pulse="selectedTask.status === 'running'"
+          />
+          <span v-if="selectedTask && !isReportReady(selectedTask.status)" class="stream-indicator">
+            {{ streamConnected ? "SSE 已连接" : "回退轮询中" }}
+          </span>
+        </div>
       </div>
 
       <template v-if="activeReport && selectedTask">
@@ -183,13 +192,70 @@
         </div>
       </template>
 
+      <template v-else-if="selectedTask">
+        <div class="progress-hero">
+          <div>
+            <p class="report-hero__symbol">{{ selectedTask.symbol }}</p>
+            <h3>{{ phaseLabel(selectedTask.progress.phase) }}</h3>
+            <p class="muted">{{ selectedTask.progress.current_step }}</p>
+          </div>
+          <div class="score-ring score-ring--progress">
+            <span>分析进度</span>
+            <strong>{{ progressPercentage }}%</strong>
+            <small>{{ selectedTask.progress.completed_agents }}/{{ selectedTask.progress.total_agents }} Agents</small>
+          </div>
+        </div>
+
+        <div class="progress-track">
+          <el-progress
+            :percentage="progressPercentage"
+            :indeterminate="selectedTask.status === 'running' && progressPercentage < 15"
+            :stroke-width="14"
+          />
+        </div>
+
+        <div class="metric-strip">
+          <div class="metric-block">
+            <span>任务状态</span>
+            <strong>{{ statusLabelMap[selectedTask.status] }}</strong>
+          </div>
+          <div class="metric-block">
+            <span>运行中 Agent</span>
+            <strong>{{ selectedTask.progress.current_agent_types.length }}</strong>
+          </div>
+          <div class="metric-block">
+            <span>队列位置</span>
+            <strong>{{ selectedTask.queue_position ?? "-" }}</strong>
+          </div>
+        </div>
+
+        <div class="agent-progress-grid">
+          <article
+            v-for="agent in selectedTask.progress.agent_states"
+            :key="agent.agent_type"
+            class="agent-progress-card"
+            :class="`agent-progress-card--${agent.status}`"
+          >
+            <div class="agent-progress-card__header">
+              <div>
+                <p class="eyebrow">{{ agentLabelMap[agent.agent_type] || agent.agent_type }}</p>
+                <h4>{{ agentStatusLabel(agent.status) }}</h4>
+              </div>
+              <StatusBadge
+                :label="agentStatusLabel(agent.status)"
+                :tone="agentStatusTone(agent.status)"
+                :pulse="agent.status === 'running'"
+              />
+            </div>
+            <p class="agent-progress-card__summary">
+              {{ agent.summary || agentStatusHint(agent.status) }}
+            </p>
+          </article>
+        </div>
+      </template>
+
       <div v-else class="empty-state">
-        <template v-if="selectedTask">
-          当前任务还在执行，报告生成后会自动显示在这里。
-        </template>
-        <template v-else>
-          选择右侧任务，或者先提交一个新的分析任务。
-        </template>
+        选择右侧任务，或者先提交一个新的分析任务。
       </div>
     </section>
   </div>
@@ -199,11 +265,23 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
 
-import { createAnalysisTask, getAnalysisReport, listAnalysisTasks, listStocks } from "../api/client";
+import {
+  createAnalysisTask,
+  getAnalysisReport,
+  getAnalysisTaskStreamUrl,
+  listAnalysisTasks,
+  listStocks
+} from "../api/client";
 import AgentInsightCard from "../components/AgentInsightCard.vue";
 import PricePulseChart from "../components/PricePulseChart.vue";
 import StatusBadge from "../components/StatusBadge.vue";
-import type { AnalysisDepth, AnalysisReport, AnalysisTask, StockListItem } from "../types";
+import type {
+  AgentProgressStatus,
+  AnalysisDepth,
+  AnalysisReport,
+  AnalysisTask,
+  StockListItem
+} from "../types";
 import { useWorkspaceStore } from "../stores/workspace";
 
 const workspaceStore = useWorkspaceStore();
@@ -222,8 +300,10 @@ const tasks = ref<AnalysisTask[]>([]);
 const selectedTaskId = ref("");
 const activeReport = ref<AnalysisReport | null>(null);
 const submitting = ref(false);
-let pollTimer: number | undefined;
-let abortController: AbortController | null = null;
+const streamConnected = ref(false);
+
+let eventSource: EventSource | null = null;
+let fallbackTimer: number | undefined;
 let suggestionRequestId = 0;
 
 const agentOptions = [
@@ -233,6 +313,10 @@ const agentOptions = [
   { label: "大盘分析师", value: "index_analyst" },
   { label: "板块分析师", value: "sector_analyst" }
 ];
+
+const agentLabelMap: Record<string, string> = Object.fromEntries(
+  agentOptions.map((item) => [item.value, item.label])
+);
 
 const depthLabelMap: Record<AnalysisDepth, string> = {
   fast: "快速",
@@ -244,12 +328,26 @@ const statusLabelMap: Record<string, string> = {
   queued: "排队中",
   running: "执行中",
   completed: "已完成",
-  completed_with_warnings: "警告完成",
+  completed_with_warnings: "带警告完成",
   failed: "失败",
   cancelled: "已取消"
 };
 
 const selectedTask = computed(() => tasks.value.find((task) => task.id === selectedTaskId.value) || null);
+
+const progressPercentage = computed(() => {
+  const task = selectedTask.value;
+  if (!task) return 0;
+  if (isTerminal(task.status)) return 100;
+
+  const progress = task.progress;
+  if (!progress.total_agents) return progress.phase === "loading_data" ? 12 : 0;
+  if (progress.phase === "summarizing") return 92;
+
+  const base = Math.round((progress.completed_agents / progress.total_agents) * 80);
+  const runningBonus = progress.current_agent_types.length > 0 ? 8 : 0;
+  return Math.min(88, Math.max(8, base + runningBonus));
+});
 
 function isTerminal(status: string) {
   return ["completed", "completed_with_warnings", "failed", "cancelled"].includes(status);
@@ -259,15 +357,74 @@ function isReportReady(status: string) {
   return status === "completed" || status === "completed_with_warnings";
 }
 
-function stopPolling() {
-  if (pollTimer) {
-    window.clearInterval(pollTimer);
-    pollTimer = undefined;
+function phaseLabel(phase: string) {
+  const phaseMap: Record<string, string> = {
+    queued: "等待调度",
+    running: "任务已启动",
+    loading_data: "正在准备数据",
+    running_agents: "多 Agent 分析中",
+    summarizing: "汇总结论中",
+    completed: "分析完成",
+    failed: "分析失败",
+    cancelled: "任务已取消"
+  };
+  return phaseMap[phase] || "分析处理中";
+}
+
+function agentStatusLabel(status: AgentProgressStatus) {
+  const labelMap: Record<AgentProgressStatus, string> = {
+    pending: "等待执行",
+    running: "执行中",
+    completed: "已完成",
+    failed: "失败"
+  };
+  return labelMap[status];
+}
+
+function agentStatusTone(status: AgentProgressStatus) {
+  const toneMap: Record<AgentProgressStatus, "neutral" | "warn" | "good" | "danger"> = {
+    pending: "neutral",
+    running: "warn",
+    completed: "good",
+    failed: "danger"
+  };
+  return toneMap[status];
+}
+
+function agentStatusHint(status: AgentProgressStatus) {
+  const hintMap: Record<AgentProgressStatus, string> = {
+    pending: "等待调度到本轮分析流程。",
+    running: "该 Agent 正在产出结构化结论。",
+    completed: "该 Agent 已提交分析结果。",
+    failed: "该 Agent 执行异常，最终报告会标出风险。"
+  };
+  return hintMap[status];
+}
+
+function mergeTask(task: AnalysisTask) {
+  const index = tasks.value.findIndex((item) => item.id === task.id);
+  if (index >= 0) {
+    tasks.value[index] = task;
+  } else {
+    tasks.value.unshift(task);
   }
-  if (abortController) {
-    abortController.abort();
-    abortController = null;
+  tasks.value = [...tasks.value].sort((left, right) => right.created_at.localeCompare(left.created_at));
+}
+
+function stopFallbackPolling() {
+  if (fallbackTimer) {
+    window.clearInterval(fallbackTimer);
+    fallbackTimer = undefined;
   }
+}
+
+function stopTaskTracking() {
+  stopFallbackPolling();
+  if (eventSource) {
+    eventSource.close();
+    eventSource = null;
+  }
+  streamConnected.value = false;
 }
 
 async function loadReport(taskId: string) {
@@ -310,28 +467,71 @@ async function refreshTasks() {
   }
 
   const task = tasks.value.find((item) => item.id === selectedTaskId.value);
-  if (task && isTerminal(task.status)) {
+  if (!task) {
+    activeReport.value = null;
+    return;
+  }
+
+  if (isReportReady(task.status)) {
     await loadReport(task.id);
+  } else if (!isTerminal(task.status)) {
+    activeReport.value = null;
   }
 }
 
-function startPolling(taskId: string) {
-  stopPolling();
-  abortController = new AbortController();
-  pollTimer = window.setInterval(async () => {
-    if (abortController?.signal.aborted) return;
+function startFallbackPolling(taskId: string) {
+  stopFallbackPolling();
+  fallbackTimer = window.setInterval(async () => {
     try {
       await refreshTasks();
       const task = tasks.value.find((item) => item.id === taskId);
       if (task && isTerminal(task.status)) {
-        stopPolling();
-        await loadReport(taskId);
+        stopTaskTracking();
+        if (isReportReady(task.status)) {
+          await loadReport(taskId);
+        }
         await workspaceStore.refreshOverview();
       }
-    } catch (err) {
-      if (err instanceof DOMException && err.name === "AbortError") return;
+    } catch {
+      // Ignore periodic polling errors and keep retrying.
     }
   }, 1500);
+}
+
+function startTaskStream(taskId: string) {
+  stopTaskTracking();
+  eventSource = new EventSource(getAnalysisTaskStreamUrl(taskId));
+
+  eventSource.onopen = () => {
+    streamConnected.value = true;
+  };
+
+  eventSource.onmessage = async (event) => {
+    try {
+      const task = JSON.parse(event.data) as AnalysisTask & { finished?: boolean };
+      mergeTask(task);
+
+      if (task.id === selectedTaskId.value && isReportReady(task.status)) {
+        await loadReport(task.id);
+      }
+
+      if (task.finished) {
+        stopTaskTracking();
+        await workspaceStore.refreshOverview();
+      }
+    } catch {
+      // Ignore malformed events and keep the stream alive.
+    }
+  };
+
+  eventSource.onerror = () => {
+    streamConnected.value = false;
+    if (eventSource) {
+      eventSource.close();
+      eventSource = null;
+    }
+    startFallbackPolling(taskId);
+  };
 }
 
 async function submitAnalysis() {
@@ -356,7 +556,7 @@ async function submitAnalysis() {
     activeReport.value = null;
     await refreshTasks();
     await workspaceStore.refreshOverview();
-    startPolling(response.task_id);
+    startTaskStream(response.task_id);
     ElMessage.success(`任务已入队，当前位置 ${response.queue_position}`);
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "任务提交失败");
@@ -366,21 +566,43 @@ async function submitAnalysis() {
 }
 
 watch(selectedTaskId, async (taskId) => {
+  if (!taskId) {
+    stopTaskTracking();
+    activeReport.value = null;
+    return;
+  }
+
   const task = tasks.value.find((item) => item.id === taskId);
   if (!task) {
     activeReport.value = null;
     return;
   }
 
-  if (isTerminal(task.status)) {
+  if (isReportReady(task.status)) {
+    stopTaskTracking();
     await loadReport(taskId);
-  } else {
+    return;
+  }
+
+  if (isTerminal(task.status)) {
+    stopTaskTracking();
     activeReport.value = null;
+    return;
+  }
+
+  activeReport.value = null;
+  startTaskStream(taskId);
+});
+
+onMounted(async () => {
+  await refreshTasks();
+  const task = selectedTask.value;
+  if (task && !isTerminal(task.status)) {
+    startTaskStream(task.id);
   }
 });
 
-onMounted(refreshTasks);
-onBeforeUnmount(stopPolling);
+onBeforeUnmount(stopTaskTracking);
 </script>
 
 <style scoped>
@@ -403,7 +625,75 @@ onBeforeUnmount(stopPolling);
 }
 
 .stock-suggestion__headline span,
-.stock-suggestion small {
+.stock-suggestion small,
+.task-item__body small,
+.stream-indicator {
+  color: var(--muted);
+}
+
+.task-item__body {
+  display: grid;
+  gap: 4px;
+}
+
+.report-status {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.stream-indicator {
+  font-size: 12px;
+}
+
+.progress-hero {
+  display: flex;
+  justify-content: space-between;
+  gap: 24px;
+  align-items: flex-start;
+}
+
+.score-ring--progress {
+  min-width: 140px;
+}
+
+.progress-track {
+  margin: 20px 0 24px;
+}
+
+.agent-progress-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px;
+}
+
+.agent-progress-card {
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  padding: 18px;
+  background: color-mix(in srgb, var(--paper) 92%, transparent);
+  display: grid;
+  gap: 14px;
+}
+
+.agent-progress-card--running {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.agent-progress-card__header {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.agent-progress-card__header h4 {
+  margin: 4px 0 0;
+}
+
+.agent-progress-card__summary {
+  margin: 0;
+  line-height: 1.6;
   color: var(--muted);
 }
 </style>

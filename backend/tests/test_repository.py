@@ -10,10 +10,16 @@ def test_create_and_get_task():
     assert task["depth"] == "fast"
     assert task["status"] == "queued"
     assert task["queue_position"] is not None
+    assert task["progress"]["total_agents"] == 1
+    assert task["progress"]["completed_agents"] == 0
+    assert task["progress"]["current_step"] == "等待执行"
+    assert task["progress"]["agent_states"][0]["agent_type"] == "market_analyst"
+    assert task["progress"]["agent_states"][0]["status"] == "pending"
 
     fetched = repository.get_task(task["id"])
     assert fetched is not None
     assert fetched["id"] == task["id"]
+    assert fetched["progress"]["agent_states"][0]["status"] == "pending"
 
 
 def test_update_task_status():
@@ -28,6 +34,32 @@ def test_update_task_status():
     completed = repository.get_task(task["id"])
     assert completed["status"] == "completed"
     assert completed["finished_at"] is not None
+
+
+def test_update_task_progress():
+    task = repository.create_task(
+        "300750.SZ",
+        "standard",
+        ["market_analyst", "news_analyst"],
+    )
+
+    repository.update_task_progress(
+        task["id"],
+        current_step="市场分析师执行中",
+        current_agent_types=["market_analyst"],
+        agent_updates={
+            "market_analyst": {
+                "status": "running",
+                "started_at": repository.utc_now(),
+            }
+        },
+    )
+
+    updated = repository.get_task(task["id"])
+    assert updated["progress"]["current_step"] == "市场分析师执行中"
+    assert updated["progress"]["current_agent_types"] == ["market_analyst"]
+    assert updated["progress"]["agent_states"][0]["status"] == "running"
+    assert updated["progress"]["agent_states"][0]["started_at"] is not None
 
 
 def test_save_and_get_report():

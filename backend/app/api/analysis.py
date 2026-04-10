@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+import json
+from datetime import datetime
+
 from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi.responses import StreamingResponse
 
 from app.core.config import load_settings
 from app.models.schemas import AnalysisReport, AnalysisTask, AnalysisTaskCreate, TaskCreatedResponse
@@ -9,6 +14,13 @@ from app.services.analysis_engine import process_analysis_task
 
 
 router = APIRouter(prefix="/api/analysis", tags=["analysis"])
+_TERMINAL_STATUSES = {"completed", "completed_with_warnings", "failed", "cancelled"}
+
+
+def _json_default(value: object) -> str:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    raise TypeError(f"Unsupported value: {type(value)!r}")
 
 
 @router.get("/tasks", response_model=list[AnalysisTask])
@@ -34,6 +46,47 @@ def get_analysis_task(task_id: str) -> AnalysisTask:
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在。")
     return AnalysisTask.model_validate(task)
+
+
+@router.get("/tasks/{task_id}/stream")
+async def stream_analysis_task(task_id: str) -> StreamingResponse:
+    task = repository.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在。")
+
+    async def event_generator():
+        last_payload = ""
+        try:
+            while True:
+                current = repository.get_task(task_id)
+                if not current:
+                    break
+
+                payload = {
+                    **current,
+                    "finished": current["status"] in _TERMINAL_STATUSES,
+                }
+                serialized = json.dumps(payload, ensure_ascii=False, default=_json_default)
+                if serialized != last_payload:
+                    last_payload = serialized
+                    yield f"data: {serialized}\n\n"
+
+                if payload["finished"]:
+                    break
+
+                await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            pass
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("/tasks/{task_id}/report", response_model=AnalysisReport)

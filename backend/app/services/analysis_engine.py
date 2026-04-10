@@ -45,6 +45,14 @@ DEPTH_CONFIG = {
 }
 
 
+def _agent_label(agent_type: str) -> str:
+    return AGENT_LABELS.get(agent_type, agent_type)
+
+
+def _set_task_phase(task_id: str, phase: str, current_step: str) -> None:
+    repository.update_task_progress(task_id, phase=phase, current_step=current_step)
+
+
 def _get_llm_provider(settings: dict[str, Any]) -> tuple[LLMProvider | None, str, str]:
     """根据设置返回可用的 LLM 提供者，优先选择已启用且有 key 的。"""
     for name, config in settings.get("llm_providers", {}).items():
@@ -308,6 +316,43 @@ async def _call_agent(
     }
 
 
+async def _call_agent_with_progress(
+    llm: LLMProvider,
+    agent_type: str,
+    system_prompt: str,
+    user_message: str,
+    task_id: str,
+    provider_name: str,
+    model_name: str,
+) -> dict[str, Any]:
+    repository.mark_task_agents_running(task_id, [agent_type])
+    repository.add_system_log("analysis", "INFO", f"{_agent_label(agent_type)} 开始执行。", task_id)
+
+    result = await _call_agent(
+        llm,
+        agent_type,
+        system_prompt,
+        user_message,
+        task_id,
+        provider_name,
+        model_name,
+    )
+
+    repository.mark_task_agent_finished(
+        task_id,
+        agent_type,
+        result.get("status", "failed"),
+        result.get("summary", ""),
+    )
+    repository.add_system_log(
+        "analysis",
+        "INFO" if result.get("status") == "completed" else "WARN",
+        f"{_agent_label(agent_type)} 执行完成，状态：{result.get('status', 'unknown')}。",
+        task_id,
+    )
+    return result
+
+
 SUMMARIZER_RESPONSE_SCHEMA = """\
 请以 JSON 格式输出你的汇总结论，严格遵循以下结构：
 ```json
@@ -424,7 +469,9 @@ async def _run_analysis(task: dict, settings: dict) -> dict[str, Any]:
         return build_report(task, settings)
 
     # 1. 构建数据包
+    _set_task_phase(task["id"], "loading_data", "正在准备本地分析数据")
     data_package = _build_data_package(task["symbol"], task["depth"])
+    _set_task_phase(task["id"], "running_agents", "正在执行 Agent 分析")
 
     # 2. 并行调用各 Agent
     prompts = settings.get("prompts", {})
@@ -433,7 +480,15 @@ async def _run_analysis(task: dict, settings: dict) -> dict[str, Any]:
         system_prompt = prompts.get(agent_type, f"你是一名{AGENT_LABELS.get(agent_type, 'A股')}分析师。")
         user_message = _build_agent_user_message(agent_type, data_package)
         agent_tasks.append(
-            _call_agent(llm, agent_type, system_prompt, user_message, task["id"], provider_name, model_name)
+            _call_agent_with_progress(
+                llm,
+                agent_type,
+                system_prompt,
+                user_message,
+                task["id"],
+                provider_name,
+                model_name,
+            )
         )
 
     agent_reports = await asyncio.gather(*agent_tasks, return_exceptions=True)
@@ -443,6 +498,12 @@ async def _run_analysis(task: dict, settings: dict) -> dict[str, Any]:
     for i, result in enumerate(agent_reports):
         if isinstance(result, Exception):
             agent_type = task["selected_agents"][i]
+            repository.mark_task_agent_finished(
+                task["id"],
+                agent_type,
+                "failed",
+                f"{_agent_label(agent_type)} 调用失败: {result}",
+            )
             cleaned_reports.append({
                 "agent_type": agent_type,
                 "status": "failed",
@@ -461,6 +522,7 @@ async def _run_analysis(task: dict, settings: dict) -> dict[str, Any]:
             cleaned_reports.append(result)
 
     # 3. 总结 Agent
+    _set_task_phase(task["id"], "summarizing", "正在汇总多 Agent 结论")
     summarizer_result = await _call_summarizer(llm, task, cleaned_reports, settings)
 
     # 4. 构建完整报告
@@ -569,7 +631,19 @@ def _run_demo_fallback(task_id: str, task: dict, settings: dict) -> None:
     def _run() -> None:
         try:
             import time
-            time.sleep(1.2)
+            repository.update_task_progress(task_id, phase="loading_data", current_step="正在准备模拟分析数据")
+            time.sleep(0.35)
+            for agent_type in task["selected_agents"]:
+                repository.mark_task_agents_running(task_id, [agent_type])
+                time.sleep(0.25)
+                repository.mark_task_agent_finished(
+                    task_id,
+                    agent_type,
+                    "completed",
+                    f"{_agent_label(agent_type)} 已完成模拟分析。",
+                )
+            repository.update_task_progress(task_id, phase="summarizing", current_step="正在汇总模拟分析结论")
+            time.sleep(0.2)
             result_holder[0] = build_report(task, settings)
         except Exception as exc:
             result_holder[1] = exc

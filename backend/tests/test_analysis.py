@@ -1,6 +1,7 @@
 """Smoke tests for the analysis task lifecycle."""
 from __future__ import annotations
 
+import json
 import time
 
 
@@ -69,6 +70,70 @@ def test_get_analysis_task_detail(client):
     task = resp.json()
     assert task["id"] == task_id
     assert task["symbol"] == "300750.SZ"
+    assert task["progress"]["total_agents"] == 1
+    assert task["progress"]["agent_states"][0]["agent_type"] == "sector_analyst"
+
+
+def test_analysis_task_stream_returns_progress_snapshot(client):
+    create_resp = client.post(
+        "/api/analysis/tasks",
+        json={
+            "symbol": "600036.SH",
+            "depth": "fast",
+            "selected_agents": ["market_analyst", "news_analyst"],
+        },
+    )
+    task_id = create_resp.json()["task_id"]
+
+    with client.stream("GET", f"/api/analysis/tasks/{task_id}/stream") as resp:
+        assert resp.status_code == 200
+        assert "text/event-stream" in resp.headers["content-type"]
+
+        payload = None
+        for line in resp.iter_lines():
+            if not line:
+                continue
+            assert line.startswith("data: ")
+            payload = json.loads(line[6:])
+            break
+
+    assert payload is not None
+    assert payload["id"] == task_id
+    assert "progress" in payload
+    assert payload["progress"]["total_agents"] == 2
+
+
+def test_analysis_task_stream_marks_terminal_snapshot(client):
+    create_resp = client.post(
+        "/api/analysis/tasks",
+        json={
+            "symbol": "601318.SH",
+            "depth": "fast",
+            "selected_agents": ["market_analyst"],
+        },
+    )
+    task_id = create_resp.json()["task_id"]
+
+    for _ in range(10):
+        time.sleep(0.5)
+        task_resp = client.get(f"/api/analysis/tasks/{task_id}")
+        task = task_resp.json()
+        if task["status"] in ("completed", "completed_with_warnings", "failed"):
+            break
+
+    with client.stream("GET", f"/api/analysis/tasks/{task_id}/stream") as resp:
+        payload = None
+        for line in resp.iter_lines():
+            if not line:
+                continue
+            if line.startswith("data: "):
+                payload = json.loads(line[6:])
+                break
+
+    assert payload is not None
+    assert payload["id"] == task_id
+    assert payload["finished"] is True
+    assert payload["status"] in ("completed", "completed_with_warnings", "failed")
 
 
 def test_get_nonexistent_task_returns_404(client):

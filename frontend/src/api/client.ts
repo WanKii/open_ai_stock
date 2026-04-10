@@ -109,6 +109,10 @@ export function getAnalysisReport(taskId: string) {
   return request<AnalysisReport>(`/analysis/tasks/${taskId}/report`);
 }
 
+export function getAnalysisTaskStreamUrl(taskId: string) {
+  return `${baseUrl}/analysis/tasks/${encodeURIComponent(taskId)}/stream`;
+}
+
 export function getSettings() {
   return request<SystemSettings>("/settings");
 }

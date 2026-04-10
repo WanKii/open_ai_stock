@@ -19,6 +19,7 @@ def init_db() -> None:
                 depth TEXT NOT NULL,
                 selected_agents TEXT NOT NULL,
                 status TEXT NOT NULL,
+                progress_json TEXT NOT NULL DEFAULT '{}',
                 queue_position INTEGER,
                 warnings TEXT NOT NULL DEFAULT '[]',
                 created_at TEXT NOT NULL,
@@ -92,6 +93,10 @@ def init_db() -> None:
         for col_name, col_type in migrations:
             if col_name not in existing:
                 connection.execute(f"ALTER TABLE sync_jobs ADD COLUMN {col_name} {col_type}")
+
+        analysis_existing = {row[1] for row in connection.execute("PRAGMA table_info(analysis_tasks)").fetchall()}
+        if "progress_json" not in analysis_existing:
+            connection.execute("ALTER TABLE analysis_tasks ADD COLUMN progress_json TEXT NOT NULL DEFAULT '{}'")
 
 
 @contextmanager

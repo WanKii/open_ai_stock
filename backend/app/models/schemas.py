@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 TaskStatus = Literal["queued", "running", "completed", "completed_with_warnings", "failed", "cancelled"]
 AnalysisDepth = Literal["fast", "standard", "deep"]
+AgentProgressStatus = Literal["pending", "running", "completed", "failed"]
 AgentType = Literal[
     "market_analyst",
     "fundamental_analyst",
@@ -23,12 +24,32 @@ class AnalysisTaskCreate(BaseModel):
     selected_agents: list[AgentType] = Field(default_factory=list)
 
 
+class AnalysisAgentProgress(BaseModel):
+    agent_type: str
+    status: AgentProgressStatus
+    summary: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class AnalysisTaskProgress(BaseModel):
+    phase: str
+    current_step: str
+    total_agents: int
+    completed_agents: int
+    current_agent_types: list[str] = Field(default_factory=list)
+    agent_states: list[AnalysisAgentProgress] = Field(default_factory=list)
+    updated_at: datetime
+
+
 class AnalysisTask(BaseModel):
     id: str
     symbol: str
     depth: AnalysisDepth
     selected_agents: list[str]
     status: TaskStatus
+    progress: AnalysisTaskProgress
     queue_position: int | None = None
     warnings: list[str] = Field(default_factory=list)
     created_at: datetime

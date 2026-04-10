@@ -7,6 +7,26 @@ export type TaskStatus =
   | "cancelled";
 
 export type AnalysisDepth = "fast" | "standard" | "deep";
+export type AgentProgressStatus = "pending" | "running" | "completed" | "failed";
+
+export interface AnalysisAgentProgress {
+  agent_type: string;
+  status: AgentProgressStatus;
+  summary?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface AnalysisTaskProgress {
+  phase: string;
+  current_step: string;
+  total_agents: number;
+  completed_agents: number;
+  current_agent_types: string[];
+  agent_states: AnalysisAgentProgress[];
+  updated_at: string;
+}
 
 export interface AnalysisTask {
   id: string;
@@ -14,6 +34,7 @@ export interface AnalysisTask {
   depth: AnalysisDepth;
   selected_agents: string[];
   status: TaskStatus;
+  progress: AnalysisTaskProgress;
   queue_position?: number | null;
   warnings: string[];
   created_at: string;
